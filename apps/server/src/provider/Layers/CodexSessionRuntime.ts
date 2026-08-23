@@ -2294,8 +2294,6 @@ export const makeCodexSessionRuntime = (
         } satisfies EffectCodexSchema.PermissionsRequestApprovalResponse;
       }),
     );
-      }),
-    );
 
     yield* client.handleServerRequest("item/tool/requestUserInput", (payload) =>
       Effect.gen(function* () {
@@ -2564,6 +2562,14 @@ export const makeCodexSessionRuntime = (
         Effect.gen(function* () {
           const providerThreadId = yield* readProviderThreadId;
           const session = yield* Ref.get(sessionRef);
+          // Settle parked approvals FIRST. The transport answers server
+          // requests inline on its stdin read loop, so a pending
+          // command/file/app-permission prompt blocks every incoming message,
+          // including the turn/interrupt response itself - cancelling after
+          // the RPC would deadlock Stop exactly when a card is open. Settling
+          // releases the handler, which answers the peer and unblocks the
+          // loop before the interrupts below are sent.
+          yield* settlePendingApprovals("cancel");
           // Stop-everything: children are full threads with their own turns;
           // interrupting only the parent leaves the fleet running. Interrupt
           // each live child turn first, best-effort per child, BOUNDED: the
