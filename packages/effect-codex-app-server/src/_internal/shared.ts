@@ -18,9 +18,9 @@ export const JsonRpcResponseEnvelope = Schema.Struct({
 });
 
 // Plan types emitted by the running codex binary can be newer than the pinned
-// protocol schema (e.g. "edu_plus"). Upstream maps unrecognized plans to
-// "unknown" via #[serde(other)]; mirror that so account payloads still decode.
-const KNOWN_PLAN_TYPES = new Set([
+// protocol schema. Upstream maps unrecognized plans to "unknown" via
+// #[serde(other)]; mirror that so account payloads still decode.
+const PINNED_PLAN_TYPES = new Set([
   "free",
   "go",
   "plus",
@@ -46,7 +46,7 @@ export const normalizeUnknownPlanTypes = (value: unknown): unknown => {
   return Object.fromEntries(
     Object.entries(value).map(([key, child]) => [
       key,
-      key === "planType" && typeof child === "string" && !KNOWN_PLAN_TYPES.has(child)
+      key === "planType" && typeof child === "string" && !PINNED_PLAN_TYPES.has(child)
         ? "unknown"
         : normalizeUnknownPlanTypes(child),
     ]),

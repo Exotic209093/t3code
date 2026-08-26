@@ -136,26 +136,35 @@ it.effect("passes request errors through without adding a wrapper", () =>
   }),
 );
 
-it.effect("normalizes unrecognized plan types to unknown before decoding", () =>
+it.effect("normalizes unrecognized account plan types to unknown before decoding", () =>
   Effect.gen(function* () {
-    const account = yield* Shared.decodeOptionalPayload(
-      "account/read",
-      CodexSchema.V2GetAccountResponse,
-      {
-        account: {
-          type: "chatgpt",
-          email: "edu@example.com",
-          planType: "edu_plus",
+    const plansAddedAfterThePinnedSchema = [
+      "self_serve_business_prolite",
+      "ent26",
+      "enterprise_cbp_automation",
+      "edu_plus",
+      "edu_pro",
+    ];
+    for (const planType of plansAddedAfterThePinnedSchema) {
+      const account = yield* Shared.decodeOptionalPayload(
+        "account/read",
+        CodexSchema.V2GetAccountResponse,
+        {
+          account: {
+            type: "chatgpt",
+            email: "new-plan@example.com",
+            planType,
+          },
+          requiresOpenaiAuth: false,
         },
-        requiresOpenaiAuth: false,
-      },
-    );
+      );
 
-    assert.deepEqual(account.account, {
-      type: "chatgpt",
-      email: "edu@example.com",
-      planType: "unknown",
-    });
+      assert.deepEqual(account.account, {
+        type: "chatgpt",
+        email: "new-plan@example.com",
+        planType: "unknown",
+      });
+    }
 
     const knownPlan = yield* Shared.decodeOptionalPayload(
       "account/read",
