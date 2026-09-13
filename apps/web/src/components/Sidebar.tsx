@@ -2375,16 +2375,25 @@ export default function Sidebar() {
   const setProjectScopeKey = useUiStateStore((store) => store.setSidebarProjectScopeKey);
   // {value, label} items let Base UI drive the combobox selection contract
   // while the popup search filters the same collection.
-  const projectScopeItems = useMemo(
-    () => [
+  // Scope items are physical project instances (environmentId:projectId), not
+  // grouped snapshots, so a repository cloned on two machines shows two
+  // selectable entries rather than one collapsed group.
+  const projectScopeItems = useMemo(() => {
+    const titleCounts = new Map<string, number>();
+    for (const project of projects) {
+      titleCounts.set(project.title, (titleCounts.get(project.title) ?? 0) + 1);
+    }
+    return [
       { value: "all", label: "All projects" },
-      ...projectGroups.map((project) => ({
-        value: project.projectKey,
-        label: project.displayName,
+      ...projects.map((project) => ({
+        value: `${project.environmentId}:${project.id}`,
+        label:
+          (titleCounts.get(project.title) ?? 0) > 1
+            ? `${project.title} · ${environmentLabelById.get(project.environmentId) ?? project.environmentId}`
+            : project.title,
       })),
-    ],
-    [projectGroups],
-  );
+    ];
+  }, [environmentLabelById, projects]);
   // Same-named projects on two machines are only told apart by where they
   // live, so rows on another machine carry its icon once the catalog spans
   // more than one environment; a single-machine catalog stays as it was.
@@ -2393,8 +2402,24 @@ export default function Sidebar() {
     [projectGroups],
   );
   const projectGroupByScopeKey = useMemo(
-    () => new Map(projectGroups.map((project) => [project.projectKey, project] as const)),
+    () =>
+      new Map<string, (typeof projectGroups)[number]>(
+        projectGroups.flatMap((group) =>
+          group.memberProjectRefs.map(
+            (ref) => [`${ref.environmentId}:${ref.projectId}`, group] as const,
+          ),
+        ),
+      ),
     [projectGroups],
+  );
+  // Physical instances keyed by plain string scope keys, matching the
+  // combobox item values.
+  const projectInstanceByScopeKey = useMemo(
+    () =>
+      new Map<string, (typeof projects)[number]>(
+        projects.map((project) => [`${project.environmentId}:${project.id}`, project] as const),
+      ),
+    [projects],
   );
   const selectedProjectScopeItem = useMemo(
     () =>
@@ -2424,22 +2449,16 @@ export default function Sidebar() {
     [projectScopeFilter, projectScopeItems, projectScopeMenuState.query],
   );
   const scopedProjectGroup = useMemo(
-    () =>
-      projectScopeKey === null
-        ? null
-        : (projectGroups.find((project) => project.projectKey === projectScopeKey) ?? null),
-    [projectGroups, projectScopeKey],
+    () => (projectScopeKey === null ? null : (projectGroupByScopeKey.get(projectScopeKey) ?? null)),
+    [projectGroupByScopeKey, projectScopeKey],
   );
+  // The selected physical instance's own record, for the trigger favicon:
+  // a multi-machine group resolves per machine, not to a representative.
+  const scopedProject =
+    projectScopeKey === null ? null : (projectInstanceByScopeKey.get(projectScopeKey) ?? null);
   const scopedProjectKeys = useMemo(
-    () =>
-      scopedProjectGroup === null
-        ? null
-        : new Set(
-            scopedProjectGroup.memberProjectRefs.map(
-              (projectRef) => `${projectRef.environmentId}:${projectRef.projectId}`,
-            ),
-          ),
-    [scopedProjectGroup],
+    () => (projectScopeKey === null ? null : new Set([projectScopeKey])),
+    [projectScopeKey],
   );
   // A persisted scope whose project is gone falls back to all projects, but
   // only after every catalog environment has a live project snapshot. Cached
@@ -4473,11 +4492,11 @@ export default function Sidebar() {
                       />
                     }
                   >
-                    {scopedProjectGroup ? (
+                    {scopedProject ? (
                       // Wrapped so the button's direct-child svg color rule cannot override
                       // a project's own icon color.
                       <span className="flex shrink-0">
-                        <ProjectFavicon project={scopedProjectGroup} className="size-4" />
+                        <ProjectFavicon project={scopedProject} className="size-4" />
                       </span>
                     ) : (
                       <FolderIcon className="size-4" />
@@ -4524,6 +4543,7 @@ export default function Sidebar() {
                     <ComboboxList>
                       {(item: (typeof projectScopeItems)[number]) => {
                         const project = projectGroupByScopeKey.get(item.value) ?? null;
+                        const instance = projectInstanceByScopeKey.get(item.value) ?? null;
                         return (
                           <ComboboxItem
                             key={item.value}
@@ -4535,8 +4555,8 @@ export default function Sidebar() {
                               if (project) handleProjectSettings(event, project);
                             }}
                           >
-                            {project ? (
-                              <ProjectFavicon project={project} className="size-4 shrink-0" />
+                            {instance ? (
+                              <ProjectFavicon project={instance} className="size-4 shrink-0" />
                             ) : (
                               <FolderIcon className="size-4 shrink-0" />
                             )}
