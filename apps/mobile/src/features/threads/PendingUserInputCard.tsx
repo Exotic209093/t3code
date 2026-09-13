@@ -1,7 +1,7 @@
 import { RequestActionButton } from "./RequestActionButton";
 import { QuestionAttachments } from "./QuestionAttachments";
 import type { ApprovalRequestId, UserInputQuestion } from "@t3tools/contracts";
-import { useCallback, useRef } from "react";
+import { useMemo, useCallback, useRef } from "react";
 import { Platform, Pressable, ScrollView, View, type LayoutChangeEvent } from "react-native";
 import Animated, {
   Easing,
@@ -13,6 +13,7 @@ import Animated, {
   withTiming,
   type SharedValue,
 } from "react-native-reanimated";
+import { Markdown, type PartialMarkdownTheme } from "react-native-nitro-markdown";
 
 import { USER_INPUT_TOGGLE_DURATION_MS } from "./pendingUserInputLayout";
 
@@ -20,6 +21,10 @@ import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { ControlPill } from "../../components/ControlPill";
 import { cn } from "../../lib/cn";
+import { useUniwindTheme } from "../../lib/useUniwindTheme";
+import { useFontFamily } from "../../lib/useFontFamily";
+import { resolveMarkdownFontSizes } from "../../lib/appearancePreferences";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import {
   isPendingUserInputOptionSelected,
   type PendingUserInput,
@@ -91,6 +96,55 @@ const CARD_LAYOUT_TRANSITION = LinearTransition.duration(200);
 
 export function PendingUserInputCard(props: PendingUserInputCardProps) {
   const questionCount = props.pendingUserInput.questions.length;
+
+  const { appearance } = useAppearancePreferences();
+  const markdownFontSizes = useMemo(
+    () => resolveMarkdownFontSizes(appearance.baseFontSize),
+    [appearance.baseFontSize],
+  );
+  const regularFontFamily = useFontFamily("regular");
+  const boldFontFamily = useFontFamily("bold");
+  const theme = useUniwindTheme();
+  const markdownBodyColor = theme["--color-md-body"];
+  const markdownStrongColor = theme["--color-md-strong"];
+  const markdownLinkColor = theme["--color-md-link"];
+  const inlineMarkdownTheme = useMemo<PartialMarkdownTheme>(
+    () => ({
+      colors: {
+        text: markdownBodyColor,
+        heading: markdownStrongColor,
+        link: markdownLinkColor,
+        surface: "transparent",
+      },
+      spacing: { xs: 0, s: 0, m: 0, l: 0, xl: 0 },
+      fontSizes: {
+        s: markdownFontSizes.s,
+        m: markdownFontSizes.m,
+        h1: markdownFontSizes.h1,
+        h2: markdownFontSizes.h2,
+        h3: markdownFontSizes.h3,
+        h4: markdownFontSizes.h4,
+        h5: markdownFontSizes.h5,
+        h6: markdownFontSizes.h6,
+      },
+      fontFamilies: {
+        regular: regularFontFamily,
+        heading: boldFontFamily,
+        mono: regularFontFamily,
+      },
+      headingWeight: "700",
+      borderRadius: { s: 4, m: 8, l: 12 },
+      showCodeLanguage: false,
+    }),
+    [
+      markdownBodyColor,
+      markdownStrongColor,
+      markdownLinkColor,
+      markdownFontSizes,
+      regularFontFamily,
+      boldFontFamily,
+    ],
+  );
 
   const cardCoverage = props.cardCoverage;
   const barHeightRef = useRef(0);
@@ -264,9 +318,7 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
               <Text className="font-t3-bold text-xs uppercase tracking-[1px] text-foreground-muted">
                 {question.header}
               </Text>
-              <Text className="font-sans text-base leading-snug text-foreground">
-                {question.question}
-              </Text>
+              <Markdown theme={inlineMarkdownTheme}>{question.question}</Markdown>
               <View className="gap-2">
                 {question.options.map((option) => {
                   const optionValue = option.value ?? option.label.trim();
@@ -289,18 +341,9 @@ export function PendingUserInputCard(props: PendingUserInputCardProps) {
                       }
                     >
                       <View className="min-w-0 flex-1 gap-0.5">
-                        <Text
-                          className={cn(
-                            "font-t3-bold text-sm",
-                            selected ? "text-foreground" : "text-foreground-secondary",
-                          )}
-                        >
-                          {option.label}
-                        </Text>
+                        <Markdown theme={inlineMarkdownTheme}>{option.label}</Markdown>
                         {description ? (
-                          <Text className="font-sans text-sm leading-5 text-foreground-muted">
-                            {description}
-                          </Text>
+                          <Markdown theme={inlineMarkdownTheme}>{description}</Markdown>
                         ) : null}
                       </View>
                     </Pressable>
