@@ -14,6 +14,8 @@
 import * as NodeOS from "node:os";
 
 import {
+  CodexSettings,
+  ProviderDriverKind,
   USAGE_CONTRACT_VERSION,
   type UsageProviderKind,
   type UsageSource,
@@ -217,12 +219,42 @@ export const make = Effect.gen(function* () {
 
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
-    const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
 
-    return [
-      { provider: "claude" as const, dir: claudeDir },
-      { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
+    // Collect Codex session directories from every configured instance. The
+    // legacy single-instance config (`settings.providers.codex`) is always
+    // scanned for backward compatibility. Additional instances declared in
+    // `settings.providerInstances` each contribute their own shared home so
+    // multi-account setups (e.g. codex_personal + codex_work) are fully
+    // covered. Duplicate shared homes are de-duplicated so two instances
+    // pointing at the same directory do not double-count transcripts.
+    const codexDriverKind = ProviderDriverKind.make("codex");
+    const seenCodexDirs = new Set<string>();
+    const dirs: Array<{ provider: UsageProviderKind; dir: string }> = [
+      { provider: "claude", dir: claudeDir },
     ];
+
+    const addCodexDir = (layout: { readonly sharedHomePath: string }) => {
+      const sessionDir = path.join(layout.sharedHomePath, "sessions");
+      if (seenCodexDirs.has(sessionDir)) return;
+      seenCodexDirs.add(sessionDir);
+      dirs.push({ provider: "codex", dir: sessionDir });
+    };
+
+    const legacyLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
+    addCodexDir(legacyLayout);
+
+    for (const instance of Object.values(settings.providerInstances)) {
+      if (instance.driver !== codexDriverKind) continue;
+      const instanceConfig =
+        typeof instance.config === "object" && instance.config !== null
+          ? (instance.config as Record<string, unknown>)
+          : {};
+      const decoded = Schema.decodeSync(CodexSettings)(instanceConfig);
+      const layout = yield* resolveCodexHomeLayout(decoded);
+      addCodexDir(layout);
+    }
+
+    return dirs;
   });
 
   /**
