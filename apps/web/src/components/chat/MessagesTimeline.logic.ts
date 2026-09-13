@@ -903,6 +903,7 @@ function attachTrailingToolGroupsToAssistant(
 function buildRevertTurnCountByUserMessageId(input: {
   supportsConversationRollback: boolean;
   timelineEntries: ReadonlyArray<TimelineEntry>;
+  turnDiffSummaries: ReadonlyArray<TurnDiffSummary>;
   turnDiffSummaryByAssistantMessageId: ReadonlyMap<MessageId, TurnDiffSummary>;
   inferredCheckpointTurnCountByTurnId: Readonly<Record<string, number | undefined>>;
 }): Map<MessageId, number> {
@@ -914,6 +915,7 @@ function buildRevertTurnCountByUserMessageId(input: {
       continue;
     }
 
+    let foundCompletedDiff = false;
     for (let nextIndex = index + 1; nextIndex < input.timelineEntries.length; nextIndex += 1) {
       const nextEntry = input.timelineEntries[nextIndex];
       if (!nextEntry || nextEntry.kind !== "message") {
@@ -932,7 +934,23 @@ function buildRevertTurnCountByUserMessageId(input: {
         break;
       }
       byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
+      foundCompletedDiff = true;
       break;
+    }
+
+    // Fallback: when no completed turn diff exists (e.g. interrupted or
+    // cancelled turns), use the latest available checkpoint as the pre-turn
+    // baseline so the Revert button still renders. Fixes upstream #11083.
+    if (!foundCompletedDiff && input.turnDiffSummaries.length > 0) {
+      const lastSummary = input.turnDiffSummaries[input.turnDiffSummaries.length - 1];
+      if (lastSummary) {
+        const turnCount =
+          lastSummary.checkpointTurnCount ??
+          input.inferredCheckpointTurnCountByTurnId[lastSummary.turnId];
+        if (typeof turnCount === "number") {
+          byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
+        }
+      }
     }
   }
   return byUserMessageId;
@@ -964,6 +982,7 @@ export function deriveMessagesTimelineRows(input: {
   const revertTurnCountByUserMessageId = buildRevertTurnCountByUserMessageId({
     supportsConversationRollback: input.supportsConversationRollback,
     timelineEntries: input.timelineEntries,
+    turnDiffSummaries: input.turnDiffSummaries,
     turnDiffSummaryByAssistantMessageId,
     inferredCheckpointTurnCountByTurnId: input.supportsConversationRollback
       ? inferCheckpointTurnCountByTurnId(input.turnDiffSummaries)
