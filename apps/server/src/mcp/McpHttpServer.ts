@@ -405,6 +405,13 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                 },
                 ...(screenshotPath === undefined ? {} : { screenshotPath }),
               };
+              // Screenshot pixel data is deliberately excluded from the MCP
+              // tool result. Embedding full-resolution base64 PNGs in tool
+              // history bricks sessions when providers reject inline images —
+              // the oversized payload cannot be removed from history and every
+              // subsequent turn fails. The structured content already carries
+              // screenshot dimensions and mime type for reference; the client
+              // preview renders the actual image from its own copy.
               const bounded = boundSnapshotMetadata(metadata);
               return new McpSchema.CallToolResult({
                 isError: false,
@@ -426,9 +433,6 @@ const registerPreviewSnapshot = Effect.fn("McpHttpServer.registerPreviewSnapshot
                           text: `Snapshot text was bounded. Omitted: ${bounded.omitted.join("; ")}.`,
                         },
                       ]),
-                  ...(payload?.includeImage === false
-                    ? []
-                    : [{ type: "image" as const, data: png, mimeType: screenshot.mimeType }]),
                 ],
               });
             }),

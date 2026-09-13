@@ -181,7 +181,7 @@ it.effect.each([
   { mode: "default", input: {}, images: true },
   { mode: "explicit image", input: { includeImage: true }, images: true },
   { mode: "text only", input: { includeImage: false }, images: false },
-])("returns fresh $mode snapshots on repeated MCP calls", ({ input, images }) =>
+])("returns fresh $mode snapshots on repeated MCP calls", ({ input }) =>
   Effect.scoped(
     Effect.gen(function* () {
       const server = yield* McpServer.McpServer;
@@ -260,15 +260,6 @@ it.effect.each([
             type: "text",
             text: "Snapshot text was bounded. Omitted: accessibilityTree (use interactiveElements locators or preview_evaluate).",
           },
-          ...(images
-            ? [
-                {
-                  type: "image",
-                  mimeType: "image/png",
-                  data: new Uint8Array(Buffer.from(png, "base64")),
-                },
-              ]
-            : []),
         ]);
       }
 
@@ -282,12 +273,7 @@ it.effect.each([
           Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
           Effect.provideService(McpSchema.McpServerClient, client),
         );
-      expect(nextDefault.content.map((content) => content.type)).toEqual([
-        "text",
-        "text",
-        "text",
-        "image",
-      ]);
+      expect(nextDefault.content.map((content) => content.type)).toEqual(["text", "text", "text"]);
       expect(nextDefault.structuredContent).toEqual({ ...page, title: "Snapshot 7", screenshot });
       expect(requests).toBe(7);
     }),
@@ -338,7 +324,8 @@ it.effect("saves the snapshot PNG on request and reports its path", () =>
       );
       expect(Buffer.from(yield* fileSystem.readFile(screenshotPath!)).toString()).toBe("png");
       const [, text] = snapshot.content;
-      expect(text?.type === "text" ? text.text : "").toContain(screenshotPath);
+      const body = text?.type === "text" ? decodeJsonText(text.text) : {};
+      expect((body as { readonly screenshotPath?: string }).screenshotPath).toBe(screenshotPath);
 
       const unsaved = yield* callSnapshot({});
       expect(unsaved.structuredContent).not.toHaveProperty("screenshotPath");
@@ -717,7 +704,12 @@ it.effect("registers annotated tools and preserves authenticated request context
           Effect.provideService(McpSchema.McpServerClient, client),
         );
       expect(snapshot.isError).toBe(false);
-      expect(snapshot.content.some((content) => content.type === "image")).toBe(true);
+      // Regression #11295: inline image content was removed from snapshot
+      // results because full-resolution base64 PNGs in tool history brick
+      // sessions when providers reject inline images.
+      expect(snapshot.content.some((content) => content.type === "image")).toBe(false);
+      expect(snapshot.content.length).toBeGreaterThan(0);
+      expect(snapshot.content.every((content) => content.type === "text")).toBe(true);
       expect(snapshot.structuredContent).toMatchObject({
         screenshot: { mimeType: "image/png", width: 10, height: 5 },
       });
