@@ -3947,4 +3947,54 @@ describe("computeStableMessagesTimelineRows", () => {
 
     expect(userRow?.revertTurnCount).toBe(1);
   });
+
+  it("applies the interrupted fallback only to the latest user message without a completed diff", () => {
+    const userEntry = (id: string, text: string, createdAt: string) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt,
+      message: {
+        id: id as never,
+        role: "user" as const,
+        text,
+        turnId: null,
+        createdAt,
+        updatedAt: createdAt,
+        streaming: false,
+      },
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        userEntry("user-1", "First ask", "2026-01-01T00:00:00Z"),
+        userEntry("user-2", "Second ask", "2026-01-01T00:01:00Z"),
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [
+        {
+          turnId: "turn-interrupted" as never,
+          checkpointTurnCount: 2,
+          checkpointRef: "refs/checkpoints/thread-1/turn-2" as never,
+          status: "ready" as const,
+          files: [],
+          assistantMessageId: null,
+          completedAt: "2026-01-01T00:01:30Z",
+        },
+      ],
+      supportsConversationRollback: true,
+    });
+
+    const revertCounts = new Map(
+      rows
+        .filter(
+          (row): row is Extract<(typeof rows)[number], { kind: "message" }> =>
+            row.kind === "message" && row.message.role === "user",
+        )
+        .map((row) => [row.message.id, row.revertTurnCount]),
+    );
+    // Only the latest user message may claim the newest baseline checkpoint;
+    // reverting an earlier message through it would undo later turns.
+    expect(revertCounts.get("user-1" as never)).toBeUndefined();
+    expect(revertCounts.get("user-2" as never)).toBe(1);
+  });
 });

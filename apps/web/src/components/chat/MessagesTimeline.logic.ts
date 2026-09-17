@@ -909,6 +909,7 @@ function buildRevertTurnCountByUserMessageId(input: {
 }): Map<MessageId, number> {
   const byUserMessageId = new Map<MessageId, number>();
   const entryCount = input.supportsConversationRollback ? input.timelineEntries.length : 0;
+  let lastFallbackUserMessageId: MessageId | null = null;
   for (let index = 0; index < entryCount; index += 1) {
     const entry = input.timelineEntries[index];
     if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
@@ -940,16 +941,22 @@ function buildRevertTurnCountByUserMessageId(input: {
 
     // Fallback: when no completed turn diff exists (e.g. interrupted or
     // cancelled turns), use the latest available checkpoint as the pre-turn
-    // baseline so the Revert button still renders. Fixes upstream #11083.
-    if (!foundCompletedDiff && input.turnDiffSummaries.length > 0) {
-      const lastSummary = input.turnDiffSummaries[input.turnDiffSummaries.length - 1];
-      if (lastSummary) {
-        const turnCount =
-          lastSummary.checkpointTurnCount ??
-          input.inferredCheckpointTurnCountByTurnId[lastSummary.turnId];
-        if (typeof turnCount === "number") {
-          byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
-        }
+    // baseline so the Revert button still renders. Applies only to the last
+    // user message without a completed diff: the baseline checkpoint belongs
+    // to the newest turn, so wiring it to an earlier message would revert
+    // through later turns. Fixes upstream #11083.
+    if (!foundCompletedDiff) {
+      lastFallbackUserMessageId = entry.message.id;
+    }
+  }
+  if (lastFallbackUserMessageId !== null && input.turnDiffSummaries.length > 0) {
+    const lastSummary = input.turnDiffSummaries[input.turnDiffSummaries.length - 1];
+    if (lastSummary) {
+      const turnCount =
+        lastSummary.checkpointTurnCount ??
+        input.inferredCheckpointTurnCountByTurnId[lastSummary.turnId];
+      if (typeof turnCount === "number") {
+        byUserMessageId.set(lastFallbackUserMessageId, Math.max(0, turnCount - 1));
       }
     }
   }
