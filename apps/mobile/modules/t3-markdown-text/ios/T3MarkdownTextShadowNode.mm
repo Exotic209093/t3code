@@ -284,12 +284,14 @@ Size T3MarkdownTextShadowNode::measureContent(
     // one line's worth of leading, causing text to be clipped at the bottom of
     // its container on iOS. Adding a fraction of the base line height as a
     // buffer ensures the measured size always encompasses the rendered glyphs.
+    // Use the largest lineHeight across all fragments: a body paragraph
+    // followed by a heading with a larger lineHeight still needs the buffer
+    // sized for the heading, not just the first fragment.
     Float heightBuffer = 0;
-    if (!baseAttributedString.isEmpty()) {
-      const auto &firstFragment = baseAttributedString.getFragments().front();
-      const Float lineHeight = firstFragment.textAttributes.lineHeight.value_or(0);
+    for (const auto &fragment : baseAttributedString.getFragments()) {
+      const Float lineHeight = fragment.textAttributes.lineHeight.value_or(0);
       if (lineHeight > 0) {
-        heightBuffer = lineHeight * 0.15f;
+        heightBuffer = std::max(heightBuffer, lineHeight * 0.15f);
       }
     }
 
