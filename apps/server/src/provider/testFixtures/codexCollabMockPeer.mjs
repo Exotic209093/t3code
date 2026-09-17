@@ -70,7 +70,8 @@ rl.on("line", (line) => {
       });
     }
     return;
-  }  if (method === "initialize") {
+  }
+  if (method === "initialize") {
     write({
       id,
       result: {
@@ -178,7 +179,8 @@ rl.on("line", (line) => {
           .replaceAll("${threadId}", String(rootThreadId))
           .replaceAll("${turnId}", String(turn.id)),
       );
-      write({ jsonrpc: "2.0", id: requestId, method: request.method, params });    }
+      write({ jsonrpc: "2.0", id: requestId, method: request.method, params });
+    }
     if (script.holdTurnOpen !== true) {
       write({
         jsonrpc: "2.0",

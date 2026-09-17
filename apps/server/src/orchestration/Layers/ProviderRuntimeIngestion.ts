@@ -499,7 +499,7 @@ export function runtimeEventToActivities(
                     ? "App access approval requested"
                     : requestKind === "permission"
                       ? "App permission approval requested"
-                    : "Approval requested",
+                      : "Approval requested",
           payload: {
             requestId: toApprovalRequestId(event.requestId),
             ...(requestKind ? { requestKind } : {}),

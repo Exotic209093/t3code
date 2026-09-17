@@ -1375,7 +1375,14 @@ function mapToRuntimeEvents(
             EffectCodexSchema.ServerRequest__PermissionsRequestApprovalParams,
             event.payload,
           );
-          return payload?.reason ?? undefined;
+          const requestedPaths = [
+            ...(payload?.permissions.fileSystem?.read ?? []),
+            ...(payload?.permissions.fileSystem?.write ?? []),
+          ];
+          return (
+            nonEmptyDetail(payload?.reason) ??
+            (requestedPaths.length > 0 ? `Access: ${requestedPaths.join(", ")}` : undefined)
+          );
         }
         case "applyPatchApproval": {
           const payload = readPayload(
