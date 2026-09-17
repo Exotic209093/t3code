@@ -670,7 +670,7 @@ export type TaskUpdatedPayload = typeof TaskUpdatedPayload.Type;
 
 const TaskCompletedPayload = Schema.Struct({
   taskId: RuntimeTaskId,
-  status: Schema.Literals(["completed", "failed", "stopped"]),
+  status: Schema.Literals(["completed", "failed", "stopped", "cancelled", "interrupted"]),
   summary: Schema.optional(TrimmedNonEmptyStringSchema),
   usage: Schema.optional(Schema.Unknown),
   typedUsage: Schema.optional(RuntimeTaskUsage),
