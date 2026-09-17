@@ -274,14 +274,73 @@ export function renderGhosttySnapshot(options: {
       // erase any subpixel edge remnants left by bar, underline, or stroke
       // cursors whose thin geometry may not be fully covered by the row
       // background fill alone.
+      const row = snapshot.rowData[snapshot.cursorY];
+      const cursorCell = row?.cells[snapshot.cursorX];
+      // Wide glyphs span two cells: the glyph lives in the leading cell and
+      // the trailing cell is an empty spacer. Repaint the full extent so the
+      // redraw matches the row pass instead of compressing the glyph.
+      let glyphStart = snapshot.cursorX;
+      if (cursorCell?.wide === GHOSTTY_CELL_WIDE.spacerTail && glyphStart > 0) {
+        glyphStart -= 1;
+      }
+      const extentWidth =
+        row?.cells[glyphStart]?.wide === GHOSTTY_CELL_WIDE.wide ? metrics.width * 2 : metrics.width;
+      const extentLeft = padding + glyphStart * metrics.width;
       context.fillStyle = cssColor(snapshot.background);
-      context.fillRect(left, top, metrics.width, metrics.height);
-      // Redraw the cell text so the glyph remains visible under the cleared cursor.
-      const cell = snapshot.rowData[snapshot.cursorY]?.cells[snapshot.cursorX];
-      if (cell && !cell.invisible && cell.text.length > 0) {
-        context.font = fontForCell(cell, fontSize, fontFamily);
-        context.fillStyle = cssColor(cell.foreground);
-        context.fillText(cell.text, left, top + metrics.baseline, metrics.width);
+      context.fillRect(extentLeft, top, extentWidth, metrics.height);
+      // Repaint the cell's layers in the row renderer's order so a cursor
+      // resting on a selected, tinted, or decorated cell does not erase them.
+      const cell = row?.cells[glyphStart];
+      if (cell) {
+        if (!ghosttyColorsEqual(cell.background, snapshot.background)) {
+          context.fillStyle = cssColor(cell.background);
+          context.fillRect(extentLeft, top, extentWidth, metrics.height);
+        }
+        if (cell.selected) {
+          context.fillStyle = selectionBackground;
+          context.fillRect(extentLeft, top, extentWidth, metrics.height);
+        }
+        if (!cell.invisible && cell.text.length > 0) {
+          context.font = fontForCell(cell, fontSize, fontFamily);
+          context.fillStyle = cssColor(cell.foreground);
+          context.fillText(cell.text, extentLeft, top + metrics.baseline, extentWidth);
+        }
+        for (
+          let column = glyphStart;
+          column < glyphStart + extentWidth / metrics.width;
+          column += 1
+        ) {
+          const decorated = row?.cells[column];
+          const hoveredLink =
+            hoveredLinkRange !== null &&
+            snapshot.cursorY >= hoveredLinkRange.start.y &&
+            snapshot.cursorY <= hoveredLinkRange.end.y &&
+            (snapshot.cursorY > hoveredLinkRange.start.y || column >= hoveredLinkRange.start.x) &&
+            (snapshot.cursorY < hoveredLinkRange.end.y || column <= hoveredLinkRange.end.x);
+          if (
+            !decorated ||
+            (!decorated.underline &&
+              !decorated.strikethrough &&
+              !decorated.overline &&
+              !hoveredLink)
+          ) {
+            continue;
+          }
+          context.fillStyle = cssColor(decorated.foreground);
+          const decorationLeft = padding + column * metrics.width;
+          if (decorated.underline || hoveredLink) {
+            context.fillRect(decorationLeft, top + metrics.height - 2, metrics.width, 1);
+          }
+          if (decorated.strikethrough) {
+            context.fillRect(
+              decorationLeft,
+              top + Math.floor(metrics.height * 0.55),
+              metrics.width,
+              1,
+            );
+          }
+          if (decorated.overline) context.fillRect(decorationLeft, top + 1, metrics.width, 1);
+        }
       }
     }
   }

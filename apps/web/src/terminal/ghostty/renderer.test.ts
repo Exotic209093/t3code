@@ -236,20 +236,25 @@ describe("renderGhosttySnapshot", () => {
   });
 
   it("clears the full cursor cell and redraws text during blink off phase", () => {
-    const fillRectCalls: [number, number, number, number][] = [];
-    const fillTextCalls: unknown[][] = [];
+    const paints: { fill: string; args: number[]; text?: string }[] = [];
+    let fillStyle = "";
     const context = {
       canvas: { width: 200, height: 40 },
       beginPath: () => {},
       clip: () => {},
-      fillRect: (x: number, y: number, width: number, height: number) =>
-        fillRectCalls.push([x, y, width, height]),
-      fillText: (...args: unknown[]) => fillTextCalls.push(args),
+      fillRect(x: number, y: number, width: number, height: number) {
+        paints.push({ fill: fillStyle, args: [x, y, width, height] });
+      },
+      fillText: (text: string, x: number, y: number, maxWidth: number) => {
+        paints.push({ fill: fillStyle, args: [x, y, maxWidth], text });
+      },
       rect: () => {},
       resetTransform: () => {},
       restore: () => {},
       save: () => {},
-      set fillStyle(_value: string) {},
+      set fillStyle(value: string) {
+        fillStyle = value;
+      },
       set font(_value: string) {},
       set textBaseline(_value: string) {},
     } as unknown as CanvasRenderingContext2D;
@@ -289,12 +294,179 @@ describe("renderGhosttySnapshot", () => {
     // The cursor cell must be explicitly cleared with a full-width rect to
     // erase bar/underline/stroke edge remnants, not just rely on the row
     // background fill which may leave subpixel artifacts at cell boundaries.
-    const cursorCellClear = fillRectCalls.find(
-      ([x, , w]) => Math.abs(x - (4 + 2 * 7.2)) < 0.01 && Math.abs(w - 7.2) < 0.01,
+    const cursorCellClear = paints.find(
+      ({ text, args }) =>
+        text === undefined &&
+        Math.abs((args[0] ?? 0) - (4 + 2 * 7.2)) < 0.01 &&
+        Math.abs((args[2] ?? 0) - 7.2) < 0.01,
     );
     expect(cursorCellClear).toBeDefined();
-    // The glyph under the cursor must be redrawn so it remains visible.
-    expect(fillTextCalls.some(([text]) => text === "x")).toBe(true);
+    // The clear must use the terminal background and the glyph must be
+    // repainted afterwards in the glyph color, proving the paint order.
+    expect(cursorCellClear?.fill).toBe("rgb(0, 0, 0)");
+    const cursorGlyph = paints.find(({ text }) => text === "x");
+    expect(cursorGlyph?.fill).toBe("rgb(255, 255, 255)");
+    expect(paints.indexOf(cursorGlyph!)).toBeGreaterThan(paints.indexOf(cursorCellClear!));
+  });
+
+  it("repaints the cursor cell layers in row order during blink off phase", () => {
+    const paints: { fill: string; args: number[]; text?: string }[] = [];
+    let fillStyle = "";
+    const context = {
+      canvas: { width: 200, height: 40 },
+      beginPath: () => {},
+      clip: () => {},
+      fillRect(x: number, y: number, width: number, height: number) {
+        paints.push({ fill: fillStyle, args: [x, y, width, height] });
+      },
+      fillText: (text: string, x: number, y: number, maxWidth: number) => {
+        paints.push({ fill: fillStyle, args: [x, y, maxWidth], text });
+      },
+      rect: () => {},
+      resetTransform: () => {},
+      restore: () => {},
+      save: () => {},
+      set fillStyle(value: string) {
+        fillStyle = value;
+      },
+      set font(_value: string) {},
+      set textBaseline(_value: string) {},
+    } as unknown as CanvasRenderingContext2D;
+    const selectedCell: GhosttyCell = {
+      ...cell("x"),
+      background: { r: 40, g: 40, b: 60 },
+      underline: true,
+      selected: true,
+    };
+    const snapshot: GhosttySnapshot = {
+      cols: 3,
+      rows: 1,
+      foreground: { r: 255, g: 255, b: 255 },
+      background: { r: 0, g: 0, b: 0 },
+      cursor: { r: 255, g: 255, b: 255 },
+      cursorX: 2,
+      cursorY: 0,
+      cursorVisible: true,
+      cursorBlinking: true,
+      cursorStyle: 1,
+      dirtyRows: new Set(),
+      rowData: [
+        {
+          cells: [cell("a"), cell("b"), selectedCell],
+          text: "abx",
+          isWrapContinuation: false,
+          wrapsToNext: false,
+        },
+      ],
+    };
+
+    renderGhosttySnapshot({
+      context,
+      snapshot,
+      metrics: { width: 7.2, height: 16, baseline: 11 },
+      fontSize: 12,
+      fontFamily: "monospace",
+      padding: 4,
+      forceFull: false,
+      cursorOn: false,
+      selectionBackground: "rgba(1, 2, 3, 0.5)",
+    });
+
+    // After the blink-off clear, the cell background, selection tint,
+    // glyph, and underline must be repainted in the row renderer's order.
+    const clearIndex = paints.findLastIndex(
+      ({ fill, text, args }) =>
+        fill === "rgb(0, 0, 0)" &&
+        text === undefined &&
+        Math.abs((args[0] ?? 0) - (4 + 2 * 7.2)) < 0.01 &&
+        Math.abs((args[2] ?? 0) - 7.2) < 0.01,
+    );
+    expect(clearIndex).toBeGreaterThanOrEqual(0);
+    expect(paints.slice(clearIndex).map(({ fill, text }) => `${fill}:${text ?? "rect"}`)).toEqual([
+      "rgb(0, 0, 0):rect",
+      "rgb(40, 40, 60):rect",
+      "rgba(1, 2, 3, 0.5):rect",
+      "rgb(255, 255, 255):x",
+      "rgb(255, 255, 255):rect",
+    ]);
+  });
+
+  it("redraws a wide cursor glyph across its full two-cell extent during blink off phase", () => {
+    const paints: { fill: string; args: number[]; text?: string }[] = [];
+    let fillStyle = "";
+    const context = {
+      canvas: { width: 200, height: 40 },
+      beginPath: () => {},
+      clip: () => {},
+      fillRect(x: number, y: number, width: number, height: number) {
+        paints.push({ fill: fillStyle, args: [x, y, width, height] });
+      },
+      fillText: (text: string, x: number, y: number, maxWidth: number) => {
+        paints.push({ fill: fillStyle, args: [x, y, maxWidth], text });
+      },
+      rect: () => {},
+      resetTransform: () => {},
+      restore: () => {},
+      save: () => {},
+      set fillStyle(value: string) {
+        fillStyle = value;
+      },
+      set font(_value: string) {},
+      set textBaseline(_value: string) {},
+    } as unknown as CanvasRenderingContext2D;
+    const snapshot: GhosttySnapshot = {
+      cols: 3,
+      rows: 1,
+      foreground: { r: 255, g: 255, b: 255 },
+      background: { r: 0, g: 0, b: 0 },
+      cursor: { r: 255, g: 255, b: 255 },
+      cursorX: 1,
+      cursorY: 0,
+      cursorVisible: true,
+      cursorBlinking: true,
+      cursorStyle: 1,
+      dirtyRows: new Set(),
+      rowData: [
+        {
+          cells: [
+            cell("a"),
+            cell("界", GHOSTTY_CELL_WIDE.wide),
+            cell("", GHOSTTY_CELL_WIDE.spacerTail),
+          ],
+          text: "a界",
+          isWrapContinuation: false,
+          wrapsToNext: false,
+        },
+      ],
+    };
+
+    renderGhosttySnapshot({
+      context,
+      snapshot,
+      metrics: { width: 7.2, height: 16, baseline: 11 },
+      fontSize: 12,
+      fontFamily: "monospace",
+      padding: 4,
+      forceFull: false,
+      cursorOn: false,
+    });
+
+    // The blink-off clear and glyph redraw must both span the wide glyph's
+    // full two-cell extent, starting at the cursor column.
+    const blinkOffClear = [...paints]
+      .reverse()
+      .find(
+        ({ text, args }) =>
+          text === undefined &&
+          Math.abs((args[0] ?? 0) - (4 + 1 * 7.2)) < 0.01 &&
+          Math.abs((args[2] ?? 0) - 14.4) < 0.01,
+      );
+    expect(blinkOffClear).toBeDefined();
+    const wideGlyph = [...paints]
+      .reverse()
+      .find(({ text, args }) => text === "界" && Math.abs((args[2] ?? 0) - 14.4) < 0.01);
+    expect(wideGlyph).toBeDefined();
+    expect(paints.indexOf(wideGlyph!)).toBeGreaterThan(paints.indexOf(blinkOffClear!));
   });
 
   it("repaints the previous cursor row after the cursor moves", () => {
