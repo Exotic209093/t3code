@@ -193,10 +193,18 @@ async function proxyRequest(
   // returns a ReadableStream that can be truncated when forwarded directly
   // into a new Response inside a protocol.handle callback, which causes
   // large JS bundles to arrive incomplete and fail with SyntaxError.
-  const body =
-    response.body && (request.method === "GET" || request.method === "HEAD")
-      ? await response.arrayBuffer()
-      : response.body;
+  // Only buffer responses whose declared size fits within this cap; anything
+  // larger (or without a content-length) streams through instead of being
+  // held in the main process.
+  const MAX_BUFFERED_RESPONSE_BYTES = 64 * 1024 * 1024;
+  const contentLength = Number(response.headers.get("content-length"));
+  const shouldBufferBody =
+    response.body !== null &&
+    (request.method === "GET" || request.method === "HEAD") &&
+    Number.isFinite(contentLength) &&
+    contentLength >= 0 &&
+    contentLength <= MAX_BUFFERED_RESPONSE_BYTES;
+  const body = shouldBufferBody ? await response.arrayBuffer() : response.body;
 
   return withContentSecurityPolicy(
     new Response(body, {
