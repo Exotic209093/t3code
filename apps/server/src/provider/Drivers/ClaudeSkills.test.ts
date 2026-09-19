@@ -242,7 +242,7 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
 
       assert.deepEqual(skills, [
         {
-          name: "demo",
+          name: "commented",
           path: path.join(configDir, "skills", "commented", "SKILL.md"),
           enabled: true,
           scope: "user",
