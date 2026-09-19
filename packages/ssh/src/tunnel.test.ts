@@ -457,6 +457,7 @@ describe("ssh tunnel scripts", () => {
         );
         const layer = Layer.mergeAll(
           NodeServices.layer,
+          TestClock.layer(),
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Layer.succeed(HttpClient.HttpClient, slowClient),
           Layer.succeed(NetService.NetService, testNetService),
@@ -473,11 +474,13 @@ describe("ssh tunnel scripts", () => {
           } as const;
           const firstFiber = yield* Effect.forkChild(manager.ensureEnvironment(target));
           yield* Deferred.await(firstProbe);
-          yield* TestClock.adjust(Duration.millis(20_000));
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust(Duration.millis(responseDelayMs));
           const first = yield* Fiber.join(firstFiber);
           const secondFiber = yield* Effect.forkChild(manager.ensureEnvironment(target));
           yield* Deferred.await(secondProbe);
-          yield* TestClock.adjust(Duration.millis(20_000));
+          yield* Effect.yieldNow;
+          yield* TestClock.adjust(Duration.millis(responseDelayMs));
           const second = yield* Fiber.join(secondFiber);
           assert.equal(first.httpBaseUrl, second.httpBaseUrl);
           assert.equal(tunnelStarts, 1);
