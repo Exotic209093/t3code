@@ -909,7 +909,11 @@ function buildRevertTurnCountByUserMessageId(input: {
 }): Map<MessageId, number> {
   const byUserMessageId = new Map<MessageId, number>();
   const entryCount = input.supportsConversationRollback ? input.timelineEntries.length : 0;
-  let lastFallbackUserMessageId: MessageId | null = null;
+  const lastUserMessageIndex = input.timelineEntries.reduce(
+    (lastIndex, entry, index) =>
+      entry.kind === "message" && entry.message.role === "user" ? index : lastIndex,
+    -1,
+  );
   for (let index = 0; index < entryCount; index += 1) {
     const entry = input.timelineEntries[index];
     if (!entry || entry.kind !== "message" || entry.message.role !== "user") {
@@ -945,18 +949,15 @@ function buildRevertTurnCountByUserMessageId(input: {
     // user message without a completed diff: the baseline checkpoint belongs
     // to the newest turn, so wiring it to an earlier message would revert
     // through later turns. Fixes upstream #11083.
-    if (!foundCompletedDiff) {
-      lastFallbackUserMessageId = entry.message.id;
-    }
-  }
-  if (lastFallbackUserMessageId !== null && input.turnDiffSummaries.length > 0) {
-    const lastSummary = input.turnDiffSummaries[input.turnDiffSummaries.length - 1];
-    if (lastSummary) {
-      const turnCount =
-        lastSummary.checkpointTurnCount ??
-        input.inferredCheckpointTurnCountByTurnId[lastSummary.turnId];
-      if (typeof turnCount === "number") {
-        byUserMessageId.set(lastFallbackUserMessageId, Math.max(0, turnCount - 1));
+    if (!foundCompletedDiff && index === lastUserMessageIndex) {
+      const lastSummary = input.turnDiffSummaries[input.turnDiffSummaries.length - 1];
+      if (lastSummary) {
+        const turnCount =
+          lastSummary.checkpointTurnCount ??
+          input.inferredCheckpointTurnCountByTurnId[lastSummary.turnId];
+        if (typeof turnCount === "number") {
+          byUserMessageId.set(entry.message.id, Math.max(0, turnCount - 1));
+        }
       }
     }
   }

@@ -3997,4 +3997,77 @@ describe("computeStableMessagesTimelineRows", () => {
     expect(revertCounts.get("user-1" as never)).toBeUndefined();
     expect(revertCounts.get("user-2" as never)).toBe(1);
   });
+
+  it("does not apply the interrupted fallback to an older user message", () => {
+    const userEntry = (id: string, text: string, createdAt: string) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt,
+      message: {
+        id: id as never,
+        role: "user" as const,
+        text,
+        turnId: null,
+        createdAt,
+        updatedAt: createdAt,
+        streaming: false,
+      },
+    });
+    const assistantEntry = {
+      id: "assistant-2-entry",
+      kind: "message" as const,
+      createdAt: "2026-01-01T00:02:00Z",
+      message: {
+        id: "assistant-2" as never,
+        role: "assistant" as const,
+        text: "Done",
+        turnId: "turn-completed" as never,
+        createdAt: "2026-01-01T00:02:00Z",
+        updatedAt: "2026-01-01T00:02:00Z",
+        streaming: false,
+      },
+    };
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        userEntry("user-1", "Interrupted ask", "2026-01-01T00:00:00Z"),
+        userEntry("user-2", "Completed ask", "2026-01-01T00:01:00Z"),
+        assistantEntry,
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [
+        {
+          turnId: "turn-interrupted" as never,
+          checkpointTurnCount: 2,
+          checkpointRef: "refs/checkpoints/thread-1/turn-2" as never,
+          status: "ready" as const,
+          files: [],
+          assistantMessageId: null,
+          completedAt: "2026-01-01T00:00:30Z",
+        },
+        {
+          turnId: "turn-completed" as never,
+          checkpointTurnCount: 3,
+          checkpointRef: "refs/checkpoints/thread-1/turn-3" as never,
+          status: "ready" as const,
+          files: [],
+          assistantMessageId: "assistant-2" as never,
+          completedAt: "2026-01-01T00:02:30Z",
+        },
+      ],
+      supportsConversationRollback: true,
+    });
+
+    const revertCounts = new Map(
+      rows
+        .filter(
+          (row): row is Extract<(typeof rows)[number], { kind: "message" }> =>
+            row.kind === "message" && row.message.role === "user",
+        )
+        .map((row) => [row.message.id, row.revertTurnCount]),
+    );
+
+    expect(revertCounts.get("user-1" as never)).toBeUndefined();
+    expect(revertCounts.get("user-2" as never)).toBe(2);
+  });
 });

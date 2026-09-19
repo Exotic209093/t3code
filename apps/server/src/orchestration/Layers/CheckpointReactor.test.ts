@@ -2284,7 +2284,7 @@ describe("CheckpointReactor", () => {
     },
   );
 
-  it.each(["interrupted", "cancelled"])(
+  it.each(["interrupted", "cancelled"] as const)(
     "preserves pre-turn baseline checkpoint as ready when turn is %s",
     async (state) => {
       const harness = await createHarness({ seedFilesystemCheckpoints: false });
@@ -2329,7 +2329,7 @@ describe("CheckpointReactor", () => {
         createdAt: "2026-01-01T00:00:01.000Z",
         threadId: ThreadId.make("thread-1"),
         turnId: asTurnId("turn-interrupted"),
-        payload: { state: "interrupted" },
+        payload: { state },
       });
 
       await waitForEvent(harness.engine, (event) => event.type === "thread.turn-diff-completed");
