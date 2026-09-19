@@ -229,6 +229,9 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
         [
           "---",
           "name: demo # display label",
+          "allowed-tools: [Read, Write]",
+          "disable-model-invocation: yes",
+          "user-invocable: no",
           // The colon-containing description is what forces the lenient
           // fallback to run at all — a comment alone wouldn't fail strict
           // parsing, so this is needed to actually exercise the fallback's
@@ -248,6 +251,8 @@ it.layer(NodeServices.layer)("discoverClaudeSkills", (it) => {
           scope: "user",
           description:
             "Browser automation + AI test authoring via kane-cli: run browser objectives, ...",
+          userInvocationOnly: true,
+          userInvocable: false,
         },
       ]);
     }),
