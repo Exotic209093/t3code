@@ -783,7 +783,6 @@ function useKeybindingRowEditor({
     // Depend on the serialized persisted values, not the parsed whenAst object:
     // a config recompile produces fresh AST references for every row, which
     // would otherwise clobber in-progress drafts on unchanged rows.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [row.key, row.when]);
   const { keyDraft, whenDraft, isRecording, isWhenDraftValid } = draft;
   const whenDraftExpression = whenAstToExpression(whenDraft);
