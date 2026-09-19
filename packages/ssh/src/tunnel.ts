@@ -1621,7 +1621,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       const readinessExit = yield* Effect.exit(
         waitForHttpReady({
           baseUrl: entry.httpBaseUrl,
-          timeoutMs: SSH_READY_TIMEOUT_MS,
+          timeoutMs: SSH_TUNNEL_READY_PROBE_TIMEOUT_MS,
           probeTimeoutMs: SSH_TUNNEL_READY_PROBE_TIMEOUT_MS,
         }),
       );
