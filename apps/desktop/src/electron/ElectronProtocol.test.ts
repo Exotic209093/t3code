@@ -65,7 +65,7 @@ describe("ElectronProtocol", () => {
       assert.equal((yield* request("/%invalid")).status, 400);
       assert.equal((yield* request("/", { method: "POST" })).status, 405);
       assert.equal(netFetchMock.mock.calls.length, 0);
-    }).pipe(Effect.provide(Layer.merge(protocolLayer, NodeServices.layer)), Effect.scoped),
+    }).pipe(Effect.scoped, Effect.provide(Layer.merge(protocolLayer, NodeServices.layer))),
   );
 
   it.effect("proxies the stable renderer origin to the current app server", () =>
@@ -205,7 +205,6 @@ describe("ElectronProtocol", () => {
           yield* protocol.registerDesktopProtocol({
             scheme: "t3code-dev",
             targetOrigin: new URL("http://127.0.0.1:3773/"),
-            backendOrigin: new URL("http://127.0.0.1:3774/"),
             clerkFrontendApiHostname: undefined,
           });
           return yield* Effect.promise(() =>
