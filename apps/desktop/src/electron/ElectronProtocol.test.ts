@@ -216,7 +216,7 @@ describe("ElectronProtocol", () => {
       const text = yield* Effect.promise(() => response.text());
       assert.equal(text.length, largePayload.length);
       assert.equal(text, largePayload);
-    }).pipe(Effect.provide(ElectronProtocol.layer)),
+    }).pipe(Effect.provide(protocolLayer)),
   );
 
   it.effect("preserves protocol registration failures", () =>
