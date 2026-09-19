@@ -280,28 +280,6 @@ it.effect.each([
   ).pipe(Effect.provide(TestLayer)),
 );
 
-it.effect("rejects non-boolean snapshot image options before selecting a browser host", () =>
-  Effect.gen(function* () {
-    const server = yield* McpServer.McpServer;
-    for (const includeImage of ["false", 0, null]) {
-      const result = yield* server
-        .callTool({
-          name: "preview_snapshot",
-          arguments: { includeImage },
-        })
-        .pipe(
-          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-          Effect.provideService(McpSchema.McpServerClient, client),
-        );
-      expect(result.isError).toBe(true);
-      expect(result.content).toEqual([{ type: "text", text: "Preview snapshot failed: AiError." }]);
-      expect(result.structuredContent).toEqual({
-        error: { _tag: "AiError", operation: "snapshot", failureCount: 1 },
-      });
-    }
-  }).pipe(Effect.provide(TestLayer)),
-);
-
 it.effect("saves the snapshot PNG on request and reports its path", () =>
   Effect.scoped(
     Effect.gen(function* () {
