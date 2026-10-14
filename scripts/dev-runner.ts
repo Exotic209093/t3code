@@ -940,7 +940,18 @@ const devRunnerCli = Command.make("dev-runner", {
   ),
 }).pipe(
   Command.withDescription("Run monorepo development modes with deterministic port/env wiring."),
-  Command.withHandler((input) => runDevRunnerWithInput(input)),
+  Command.withHandler((input) =>
+    Effect.gen(function* () {
+      if (input.mode === "dev:desktop") {
+        yield* watchParentLiveness({
+          onParentExit: () => {
+            process.kill(process.pid, "SIGTERM");
+          },
+        }).pipe(Effect.forkScoped);
+      }
+      yield* runDevRunnerWithInput(input);
+    }),
+  ),
 );
 
 const cliRuntimeLayer = Layer.mergeAll(
@@ -950,12 +961,9 @@ const cliRuntimeLayer = Layer.mergeAll(
 );
 
 if (import.meta.main) {
-  Effect.gen(function* () {
-    yield* watchParentLiveness({
-      onParentExit: () => {
-        process.kill(process.pid, "SIGTERM");
-      },
-    }).pipe(Effect.forkScoped);
-    yield* Command.run(devRunnerCli, { version: "0.0.0" });
-  }).pipe(Effect.scoped, Effect.provide(cliRuntimeLayer), NodeRuntime.runMain);
+  Command.run(devRunnerCli, { version: "0.0.0" }).pipe(
+    Effect.scoped,
+    Effect.provide(cliRuntimeLayer),
+    NodeRuntime.runMain,
+  );
 }
