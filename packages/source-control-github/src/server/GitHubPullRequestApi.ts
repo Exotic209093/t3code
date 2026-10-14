@@ -1022,7 +1022,9 @@ const decodeMergeMessage = (raw: string) =>
 const actionStateGraphQlQuery = (host: string) => {
   const githubCom = host.toLowerCase() === "github.com";
   const headRefVariable = githubCom ? ", $headRef: String!" : "";
-  const comparison = githubCom ? "baseRef { compare(headRef: $headRef) { behindBy } }" : "";
+  const comparison = githubCom
+    ? "baseRef { compare(headRef: $headRef) { behindBy } }"
+    : "baseRefOid";
   return `
 query PullRequestActionState($owner: String!, $name: String!, $number: Int!${headRefVariable}) {
   repository(owner: $owner, name: $name) {
@@ -1045,6 +1047,7 @@ const decodeActionStateResponse = Schema.decodeUnknownResult(
           pullRequest: Schema.Struct({
             id: Schema.String,
             headRefOid: Schema.String,
+            baseRefOid: Schema.optional(Schema.NullOr(Schema.String)),
             isMergeQueueEnabled: Schema.optional(Schema.Boolean),
             mergeStateStatus: Schema.optional(Schema.NullOr(Schema.String)),
             baseRef: Schema.optional(
@@ -1060,6 +1063,12 @@ const decodeActionStateResponse = Schema.decodeUnknownResult(
 );
 const decodeActionState = (raw: string) =>
   Result.map(decodeActionStateResponse(raw), (response) => response.data.repository.pullRequest);
+
+const decodeRefComparisonResponse = Schema.decodeUnknownResult(
+  Schema.fromJsonString(Schema.Struct({ behind_by: Schema.Int })),
+);
+const decodeRefComparison = (raw: string) =>
+  Result.map(decodeRefComparisonResponse(raw), (response) => response.behind_by);
 
 const MERGE_PULL_REQUEST_GRAPHQL_MUTATION = `mutation($input: MergePullRequestInput!) {
   mergePullRequest(input: $input) { clientMutationId }
@@ -2634,6 +2643,33 @@ export const make = Effect.gen(function* () {
         if (action === "update-branch") {
           // Already current is done, the way `gh pr update-branch` reports it.
           if (state.baseRef?.compare?.behindBy === 0) return;
+          if (input.host.toLowerCase() !== "github.com") {
+            const baseRefOid = state.baseRefOid;
+            if (baseRefOid === undefined || baseRefOid === null) {
+              return yield* new GitHubPullRequestReadError({
+                cwd: input.cwd,
+                operation: "runPullRequestAction",
+                cause: new Error("Enterprise pull request did not include baseRefOid"),
+              });
+            }
+            const behindBy = yield* restRead({
+              cwd: input.cwd,
+              host: input.host,
+              operation: "runPullRequestAction",
+              path:
+                "repos/" +
+                owner +
+                "/" +
+                name +
+                "/compare/" +
+                baseRefOid +
+                "..." +
+                state.headRefOid +
+                "?per_page=1",
+              decode: decodeRefComparison,
+            });
+            if (behindBy === 0) return;
+          }
           // GitHub updates with a merge commit unless asked to rebase, which is its own default.
           return yield* graphql({
             host: input.host,

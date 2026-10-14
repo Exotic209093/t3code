@@ -2205,9 +2205,12 @@ layer("GitHubPullRequestApi.layer", (it) => {
     }),
   );
 
-  it.effect("updates an Enterprise branch without querying its unsupported comparison", () =>
+  it.effect("updates an Enterprise branch after reading its supported comparison", () =>
     Effect.gen(function* () {
-      route(["query PullRequestActionState", actionState({ baseRef: undefined })]);
+      route(
+        ["query PullRequestActionState", actionState({ baseRef: undefined, baseRefOid: "def456" })],
+        ["compare/", { behind_by: 2 }],
+      );
       const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
 
       yield* cli.runPullRequestAction({
@@ -2220,9 +2223,95 @@ layer("GitHubPullRequestApi.layer", (it) => {
 
       expect(varsAt(0)).not.toHaveProperty("headRef");
       expect(queryAt(0)).not.toContain("compare(headRef:");
+      expect(pathAt(1)).toBe("repos/acme/web/compare/def456...abc123?per_page=1");
       expect(variablesOf("updatePullRequestBranch(")).toEqual([
         { pullRequestId: "PR_7", expectedHeadOid: "abc123", updateMethod: "MERGE" },
       ]);
+    }),
+  );
+
+  it.effect("treats an already-current Enterprise branch update as a successful no-op", () =>
+    Effect.gen(function* () {
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(encodeJson(actionState({ baseRef: undefined, baseRefOid: "def456" }))),
+        ),
+      );
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson({ behind_by: 0 }))));
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+
+      yield* cli.runPullRequestAction({
+        cwd: "/w",
+        repository: "acme/web",
+        host: "ghe.example.test",
+        number: 7,
+        action: "update-branch",
+      });
+
+      expect(pathAt(1)).toBe("repos/acme/web/compare/def456...abc123?per_page=1");
+      expect(variablesOf("updatePullRequestBranch(")).toEqual([]);
+    }),
+  );
+
+  it.effect("does not update an Enterprise branch when comparison fails", () =>
+    Effect.gen(function* () {
+      const failure = new GitHubApi.GitHubApiResponseError({
+        host: "ghe.example.test",
+        operation: "runPullRequestAction",
+        status: 503,
+        githubErrors: ["comparison unavailable"],
+      });
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(encodeJson(actionState({ baseRef: undefined, baseRefOid: "def456" }))),
+        ),
+      );
+      mockedExecute.mockReturnValueOnce(Effect.fail(failure));
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+
+      const error = yield* Effect.flip(
+        cli.runPullRequestAction({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "ghe.example.test",
+          number: 7,
+          action: "update-branch",
+        }),
+      );
+
+      expect(error).toBe(failure);
+      expect(variablesOf("updatePullRequestBranch(")).toEqual([]);
+    }),
+  );
+
+  it.effect("does not hide genuine Enterprise branch update errors", () =>
+    Effect.gen(function* () {
+      const failure = new GitHubApi.GitHubApiResponseError({
+        host: "ghe.example.test",
+        operation: "runPullRequestAction",
+        status: 422,
+        githubErrors: ["merge conflict between base and head (updatePullRequestBranch)"],
+      });
+      mockedExecute.mockReturnValueOnce(
+        Effect.succeed(
+          output(encodeJson(actionState({ baseRef: undefined, baseRefOid: "def456" }))),
+        ),
+      );
+      mockedExecute.mockReturnValueOnce(Effect.succeed(output(encodeJson({ behind_by: 2 }))));
+      mockedExecute.mockReturnValueOnce(Effect.fail(failure));
+      const cli = yield* GitHubPullRequestApi.GitHubPullRequestApi;
+
+      const error = yield* Effect.flip(
+        cli.runPullRequestAction({
+          cwd: "/w",
+          repository: "acme/web",
+          host: "ghe.example.test",
+          number: 7,
+          action: "update-branch",
+        }),
+      );
+
+      expect(error).toBe(failure);
     }),
   );
 
