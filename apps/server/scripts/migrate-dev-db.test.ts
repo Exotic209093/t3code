@@ -7,7 +7,7 @@ import * as SqlClient from "effect/sql/SqlClient";
 
 import { runMigrations } from "../src/persistence/Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { runMigrateDevDb } from "./migrate-dev-db.ts";
+import { MigrateDevDbLegacyV1DataError, runMigrateDevDb } from "./migrate-dev-db.ts";
 
 const withDatabase = <A, E>(
   databasePath: string,
@@ -198,6 +198,78 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
         { sharedHome: sourceDir },
       );
       assert.include(result.executedMigrations, "55_OrchestrationV2");
+    }),
+  );
+
+  it.effect("refuses populated V1 data before pruning or replacing the destination", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-v1-data-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-v1-data-dest-" });
+      const sourceStateDir = path.join(sourceDir, "userdata");
+      const source = path.join(sourceStateDir, "state.sqlite");
+      yield* fs.makeDirectory(sourceStateDir, { recursive: true });
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations({ toMigrationInclusive: 54 });
+          yield* sql`INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+            VALUES ('legacy-project', 'Legacy', '/tmp/legacy', '[]', '2026-08-01', '2026-08-01', NULL)`;
+          yield* sql`INSERT INTO projection_threads
+            (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
+            VALUES ('legacy-thread', 'legacy-project', 'Legacy thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', '2026-08-01', '2026-08-01')`;
+          yield* sql`INSERT INTO projection_thread_messages
+            (message_id, thread_id, role, text, is_streaming, created_at, updated_at)
+            VALUES ('legacy-message', 'legacy-thread', 'user', 'Keep me', 0, '2026-08-01', '2026-08-01')`;
+        }),
+      );
+
+      const destination = path.join(destDir, "userdata", "statev2.sqlite");
+      yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
+      yield* withDatabase(
+        destination,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations();
+          yield* sql`INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+            VALUES ('existing-project', 'Existing output', '/tmp/existing', '[]', '2026-08-01', '2026-08-01', NULL)`;
+        }),
+      );
+
+      const error = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+        { sharedHome: sourceDir },
+      ).pipe(Effect.flip);
+      assert.instanceOf(error, MigrateDevDbLegacyV1DataError);
+      if (error._tag === "MigrateDevDbLegacyV1DataError") {
+        assert.equal(error.threadCount, 1);
+        assert.equal(error.sourcePath, source);
+      }
+
+      const sourceRows = yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ threads: number; messages: number }>`
+            SELECT
+              (SELECT COUNT(*) FROM projection_threads) AS threads,
+              (SELECT COUNT(*) FROM projection_thread_messages) AS messages`;
+        }),
+      );
+      const destinationRows = yield* withDatabase(
+        destination,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ title: string }>`
+            SELECT title FROM projection_projects WHERE project_id = 'existing-project'`;
+        }),
+      );
+      assert.deepStrictEqual(sourceRows, [{ threads: 1, messages: 1 }]);
+      assert.deepStrictEqual(destinationRows, [{ title: "Existing output" }]);
     }),
   );
 

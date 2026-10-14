@@ -22,6 +22,10 @@
  *      on top of the real applied set, and the slot check below catches
  *      the silent failure where two branches claim the same
  *      `Migrations/NNN_` id (the second one's CREATE TABLE is skipped).
+ *      A populated source from before the V2 thread tables is refused after
+ *      migration: this script does not run the server's V1 importer, so
+ *      pruning it would otherwise erase the copied legacy threads. An empty
+ *      legacy schema remains useful for migration checks.
  *
  * The event log (`orchestration_events`) is pruned per stream while
  * `sqlite_sequence` and the projection cursors carry over untouched, so new events keep appending
@@ -84,6 +88,18 @@ export class MigrateDevDbSourceIsDestinationError extends Schema.TaggedError<Mig
 ) {
   override get message(): string {
     return `Source database '${this.sourcePath}' resolves to a path this command rewrites. Pick a different --source or --base-dir.`;
+  }
+}
+
+export class MigrateDevDbLegacyV1DataError extends Schema.TaggedError<MigrateDevDbLegacyV1DataError>()(
+  "MigrateDevDbLegacyV1DataError",
+  {
+    sourcePath: Schema.String,
+    threadCount: Schema.Number,
+  },
+) {
+  override get message(): string {
+    return `Source database '${this.sourcePath}' contains ${this.threadCount} legacy V1 thread(s), but migrate-dev-db cannot import V1 thread data into V2. Open it with a build that supports the V1 import first, then rerun with the resulting statev2.sqlite.`;
   }
 }
 
@@ -327,6 +343,25 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
   yield* sql`DETACH DATABASE src`;
 });
 
+/** V1 rows are copied before migration, but no migration populates their V2 projections. */
+const ensureLegacyV1DataWasImported = Effect.fn("ensureLegacyV1DataWasImported")(function* (
+  sourcePath: string,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const [legacy] = yield* sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM projection_threads
+  `;
+  if ((legacy?.count ?? 0) === 0) return;
+  const [v2] = yield* sql<{ count: number }>`
+    SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads
+  `;
+  if ((v2?.count ?? 0) > 0) return;
+  return yield* new MigrateDevDbLegacyV1DataError({
+    sourcePath,
+    threadCount: Number(legacy?.count ?? 0),
+  });
+});
+
 const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigrateDevDbInput) {
   const sql = yield* SqlClient.SqlClient;
 
@@ -552,6 +587,12 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("migrate", snapshotPath),
+    );
+
+    // Migration 055 creates the V2 tables but the V1 importer normally runs during server boot.
+    // Refuse before pruning the copied V1 rows or replacing the existing worktree database.
+    yield* ensureLegacyV1DataWasImported(sourcePath).pipe(
+      Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
     );
 
     // Verify while the snapshot is still the only thing touched: a slot
