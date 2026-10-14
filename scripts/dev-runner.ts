@@ -811,18 +811,21 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
         Effect.gen(function* () {
           const isElectronSupervisor =
             input.mode === "dev:desktop" && modeArgs.at(-1) === "dev:electron";
+          const args = isElectronSupervisor
+            ? [DESKTOP_ELECTRON_SCRIPT]
+            : [...modeArgs, ...input.runArgs];
           const spawnCommand = isElectronSupervisor
             ? {
                 command: process.execPath,
-                args: [DESKTOP_ELECTRON_SCRIPT],
+                args,
                 shell: false,
               }
-            : yield* resolveSpawnCommand("vp", [...modeArgs, ...input.runArgs], { env });
+            : yield* resolveSpawnCommand("vp", args, { env });
           const childEnv = isElectronSupervisor ? { ...env, T3CODE_DEV_PARENT_LIVENESS: "1" } : env;
           const processContext = {
             mode: input.mode,
             executable: isElectronSupervisor ? process.execPath : "vp",
-            argumentCount: spawnCommand.args.length,
+            argumentCount: args.length,
             shell: spawnCommand.shell,
           } as const;
           const isInteractiveViteTask = input.mode !== "dev:server" && modeArgs.at(-1) === "dev";
