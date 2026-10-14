@@ -146,6 +146,29 @@ const OAuthErrorResponse = Schema.Struct({
   error: Schema.String,
   error_description: Schema.optional(Schema.String),
 });
+const OAuthRefreshErrorCode = Schema.Literals([
+  "invalid_grant",
+  "invalid_client",
+  "unauthorized_client",
+  "unsupported_grant_type",
+  "invalid_request",
+  "invalid_scope",
+  "access_denied",
+]);
+type OAuthRefreshErrorCode = typeof OAuthRefreshErrorCode.Type;
+const isOAuthRefreshErrorCode = Schema.is(OAuthRefreshErrorCode);
+const OAuthRefreshErrorResponse = Schema.Struct({
+  error: OAuthRefreshErrorCode,
+  error_description: Schema.optional(Schema.String),
+});
+const decodeOAuthRefreshErrorResponse = Schema.decodeUnknownOption(
+  Schema.fromJsonString(OAuthRefreshErrorResponse),
+);
+
+function sanitizedOAuthErrorCode(body: string): OAuthRefreshErrorCode | undefined {
+  const decoded = decodeOAuthRefreshErrorResponse(body);
+  return Option.isSome(decoded) ? decoded.value.error : undefined;
+}
 
 const DeviceAuthorizationResponse = Schema.Struct({
   device_code: Schema.String,
@@ -200,11 +223,14 @@ export class CloudCliCredentialRefreshError extends Schema.TaggedError<CloudCliC
     requiresLogin: Schema.optional(Schema.Boolean).pipe(
       Schema.withConstructorDefault(Effect.succeed(false)),
     ),
+    oauthErrorCode: Schema.optional(OAuthRefreshErrorCode),
   },
 ) {
   override get message(): string {
     return this.requiresLogin
-      ? "Could not refresh the T3 Connect CLI credential. Run `t3 connect login` to authorize again."
+      ? `Could not refresh the T3 Connect CLI credential${
+          this.oauthErrorCode === undefined ? "" : ` (OAuth error: ${this.oauthErrorCode})`
+        }. Run \`t3 connect login\` to authorize again.`
       : "Could not refresh the T3 Connect CLI credential.";
   }
 }
@@ -298,16 +324,57 @@ const readTokenResponse = Effect.fn("cloud.cli_token.read_token_response")(funct
   };
 });
 
+const isPermanentRefreshStatus = (status: number): boolean =>
+  status >= 400 && status < 500 && status !== 408 && status !== 429;
+
+const makeStatusCodeError = (
+  response: HttpClientResponse.HttpClientResponse,
+  oauthErrorCode?: OAuthRefreshErrorCode,
+) =>
+  new HttpClientError.HttpClientError({
+    reason: new HttpClientError.StatusCodeError({
+      request: response.request,
+      response,
+      ...(oauthErrorCode === undefined ? {} : { cause: oauthErrorCode }),
+    }),
+  });
+
+const isStatusCodeError = (cause: unknown): cause is HttpClientError.HttpClientError =>
+  HttpClientError.isHttpClientError(cause) && cause.reason._tag === "StatusCodeError";
+
 const exchangeToken = Effect.fn("cloud.cli_token.exchange")(function* (
   metadata: Pick<CloudCliOAuthConfig, "tokenEndpoint">,
   params: Record<string, string>,
 ) {
-  const httpClient = (yield* HttpClient.HttpClient).pipe(HttpClient.filterStatusOk);
+  const httpClient = yield* HttpClient.HttpClient;
+  const isRefreshGrant = params.grant_type === "refresh_token";
+  let responseWithStatus: HttpClientResponse.HttpClientResponse | undefined;
   return yield* HttpClientRequest.post(metadata.tokenEndpoint).pipe(
     HttpClientRequest.bodyUrlParams(params),
     httpClient.execute,
-    Effect.flatMap((response) => readTokenResponse(response, params)),
+    Effect.flatMap((response) => {
+      responseWithStatus = response;
+      if (response.status >= 200 && response.status < 300) {
+        return readTokenResponse(response, params);
+      }
+      if (!isRefreshGrant || !isPermanentRefreshStatus(response.status)) {
+        return Effect.fail(makeStatusCodeError(response));
+      }
+      return response.text.pipe(
+        Effect.flatMap((body) =>
+          Effect.fail(makeStatusCodeError(response, sanitizedOAuthErrorCode(body))),
+        ),
+      );
+    }),
     Effect.timeout(OAUTH_REQUEST_TIMEOUT),
+    Effect.catch((cause) =>
+      responseWithStatus !== undefined &&
+      isRefreshGrant &&
+      isPermanentRefreshStatus(responseWithStatus.status) &&
+      !isStatusCodeError(cause)
+        ? Effect.fail(makeStatusCodeError(responseWithStatus))
+        : Effect.fail(cause),
+    ),
   );
 });
 
@@ -556,19 +623,23 @@ export const make = Effect.gen(function* () {
 
   const getExisting = semaphore.withPermits(1)(
     getExistingNoLock().pipe(
-      Effect.mapError(
-        (cause) =>
-          new CloudCliCredentialRefreshError({
-            cause,
-            requiresLogin:
-              HttpClientError.isHttpClientError(cause) &&
-              cause.reason._tag === "StatusCodeError" &&
-              cause.reason.response.status >= 400 &&
-              cause.reason.response.status < 500 &&
-              cause.reason.response.status !== 408 &&
-              cause.reason.response.status !== 429,
-          }),
-      ),
+      Effect.mapError((cause) => {
+        const statusReason =
+          HttpClientError.isHttpClientError(cause) && cause.reason._tag === "StatusCodeError"
+            ? cause.reason
+            : undefined;
+        const requiresLogin =
+          statusReason !== undefined && isPermanentRefreshStatus(statusReason.response.status);
+        const oauthErrorCode =
+          requiresLogin && isOAuthRefreshErrorCode(statusReason?.cause)
+            ? statusReason.cause
+            : undefined;
+        return new CloudCliCredentialRefreshError({
+          cause,
+          requiresLogin,
+          ...(oauthErrorCode === undefined ? {} : { oauthErrorCode }),
+        });
+      }),
       Effect.provide(services),
     ),
   );
