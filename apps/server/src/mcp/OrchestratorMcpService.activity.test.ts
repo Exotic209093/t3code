@@ -585,6 +585,7 @@ it("scheduleTask inherits the environment default model for an external caller",
                 defaultModelSelection: null,
               } as never),
             ),
+          getEffectiveDefaultModelSelection: () => Effect.succeed(environmentModel),
         }),
         Layer.mock(SecretRequests.SecretRequests)({}),
         Layer.mock(ScheduledTaskService.ScheduledTaskService)({
@@ -613,4 +614,64 @@ it("scheduleTask inherits the environment default model for an external caller",
     expect(upserted).toHaveLength(1);
     expect((upserted[0] as { modelSelection: unknown }).modelSelection).toEqual(environmentModel);
   }).pipe(Effect.provide(layer), Effect.runPromise);
+});
+
+it("bounds settings read failures for an external schedule caller", async () => {
+  const targetProjectId = ProjectId.make("project-mcp-settings-failure");
+  const scope: McpInvocationContext.McpInvocationScope = {
+    environmentId,
+    requestNamespace: "provider-session-mcp-settings-failure",
+    thread: undefined,
+    client: { sessionId: "settings-failure", label: "MCP client", access: "auto" },
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 1,
+  };
+  const layer = layerOrchestratorService.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(ThreadManagementService.ThreadManagementService)({}),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProjectService.ProjectService)({
+          getById: () =>
+            Effect.succeed(
+              Option.some({
+                id: targetProjectId,
+                workspaceRoot: "/projects/settings-failure",
+                defaultModelSelection: null,
+              } as never),
+            ),
+          getEffectiveDefaultModelSelection: () =>
+            Effect.fail(
+              new ProjectService.ProjectOperationError({
+                operation: "read-project",
+                projectId: targetProjectId,
+                cause: new Error("path details must stay private"),
+              }),
+            ),
+        }),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        NodeCrypto.layer,
+      ),
+    ),
+  );
+
+  const failure = await Effect.gen(function* () {
+    const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+    return yield* service
+      .scheduleTask(scope, {
+        projectId: targetProjectId,
+        prompt: "Check the project",
+        schedule: { type: "interval", everyMs: 60_000 },
+      })
+      .pipe(Effect.flip);
+  }).pipe(Effect.provide(layer), Effect.runPromise);
+
+  expect(failure.code).toBe("orchestration_error");
+  expect(failure.message).toBe("Unable to read server settings.");
+  expect(failure.message).not.toContain("path details must stay private");
 });

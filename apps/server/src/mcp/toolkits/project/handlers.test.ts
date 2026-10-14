@@ -323,6 +323,12 @@ const clientLaunchHarness = (input: {
     instanceId: ProviderInstanceId.make("claudeAgent"),
     model: "claude-opus",
   };
+  const projectDefaultModelSelection =
+    input.projectDefaultModelSelection === undefined
+      ? modelSelection
+      : input.projectDefaultModelSelection;
+  const effectiveDefaultModelSelection =
+    projectDefaultModelSelection ?? input.environmentDefaultModelSelection ?? null;
   const layerDependencies = Layer.mergeAll(
     ServerSettings.layerTest({
       defaultModelSelection: input.environmentDefaultModelSelection ?? null,
@@ -366,13 +372,11 @@ const clientLaunchHarness = (input: {
             ? Option.some({
                 id,
                 workspaceRoot: input.workspaceRoot ?? "/projects/client-target",
-                defaultModelSelection:
-                  input.projectDefaultModelSelection === undefined
-                    ? modelSelection
-                    : input.projectDefaultModelSelection,
+                defaultModelSelection: projectDefaultModelSelection,
               } as unknown as ProjectRecord)
             : Option.none(),
         ),
+      getEffectiveDefaultModelSelection: () => Effect.succeed(effectiveDefaultModelSelection),
     }),
     Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/projects" }),
     NodeServices.layer,
