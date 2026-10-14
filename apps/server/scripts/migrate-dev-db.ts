@@ -22,10 +22,10 @@
  *      on top of the real applied set, and the slot check below catches
  *      the silent failure where two branches claim the same
  *      `Migrations/NNN_` id (the second one's CREATE TABLE is skipped).
- *      A populated source from before the V2 thread tables is refused after
- *      migration: this script does not run the server's V1 importer, so
- *      pruning it would otherwise erase the copied legacy threads. An empty
- *      legacy schema remains useful for migration checks.
+ *      A source with unimported V1 threads is refused before copying: this
+ *      script does not run the server's V1 importer, so pruning it would
+ *      otherwise erase legacy threads. An empty legacy schema, or a source
+ *      whose V1 threads all have V2 projections, remains usable.
  *
  * The event log (`orchestration_events`) is pruned per stream while
  * `sqlite_sequence` and the projection cursors carry over untouched, so new events keep appending
@@ -99,9 +99,11 @@ export class MigrateDevDbLegacyV1DataError extends Schema.TaggedError<MigrateDev
   },
 ) {
   override get message(): string {
-    return `Source database '${this.sourcePath}' contains ${this.threadCount} legacy V1 thread(s), but migrate-dev-db cannot import V1 thread data into V2. Open it with a build that supports the V1 import first, then rerun with the resulting statev2.sqlite.`;
+    return `Source database '${this.sourcePath}' contains ${this.threadCount} unimported legacy V1 thread(s), but migrate-dev-db cannot import V1 thread data into V2. Open it with a build that supports the V1 import first, then rerun with the resulting statev2.sqlite.`;
   }
 }
+
+const isMigrateDevDbLegacyV1DataError = Schema.is(MigrateDevDbLegacyV1DataError);
 
 export class MigrateDevDbServerRunningError extends Schema.TaggedError<MigrateDevDbServerRunningError>()(
   "MigrateDevDbServerRunningError",
@@ -285,12 +287,43 @@ const rootIsVisible = (sql: SqlClient.SqlClient) => sql`
   AND json_extract(root.payload_json, '$.settledAt') IS NULL
   AND json_extract(root.payload_json, '$.settledOverride') IS NOT 'settled'`;
 
+/** Refuse V1 rows that the server's boot-time importer has not represented in V2. */
+const ensureLegacyV1DataWasImported = Effect.fn("ensureLegacyV1DataWasImported")(function* (
+  sourcePath: string,
+) {
+  const sql = yield* SqlClient.SqlClient;
+  const tables = yield* sql<{ name: string }>`
+    SELECT name FROM src.sqlite_master
+    WHERE type = 'table'
+      AND name IN ('projection_threads', 'orchestration_v2_projection_threads')
+  `;
+  if (!tables.some((table) => table.name === "projection_threads")) return;
+  const hasV2Threads = tables.some((table) => table.name === "orchestration_v2_projection_threads");
+  const [legacy] = hasV2Threads
+    ? yield* sql<{ count: number }>`
+        SELECT COUNT(*) AS count
+        FROM src.projection_threads AS legacy
+        LEFT JOIN src.orchestration_v2_projection_threads AS v2
+          ON v2.thread_id = legacy.thread_id
+        WHERE v2.thread_id IS NULL
+      `
+    : yield* sql<{ count: number }>`
+        SELECT COUNT(*) AS count FROM src.projection_threads
+      `;
+  if ((legacy?.count ?? 0) === 0) return;
+  return yield* new MigrateDevDbLegacyV1DataError({
+    sourcePath,
+    threadCount: Number(legacy?.count ?? 0),
+  });
+});
+
 /**
  * Copies the source into the empty snapshot, without the rows of thread families whose root is
  * hidden. The prune drops those anyway, and they hold nearly all of a long-lived database's
  * events, so copying them is what used to make this take a full-size copy of the real db.
- * A source from before the V2 thread tables has no visibility to filter on, so it is copied
- * whole. One transaction reads the source, so the copy is consistent while the real server writes.
+ * Unimported V1 threads are refused before copying. An empty source from before the V2 thread
+ * tables has no visibility to filter on and is copied whole. One transaction reads the source,
+ * so the copy is consistent while the real server writes.
  */
 const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath: string) {
   const sql = yield* SqlClient.SqlClient;
@@ -307,6 +340,7 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
+      yield* ensureLegacyV1DataWasImported(sourcePath);
       for (const table of tables) yield* sql.unsafe(table.sql).unprepared;
       if (filtered) {
         yield* sql`CREATE TEMP TABLE copied_threads (thread_id TEXT PRIMARY KEY)`;
@@ -341,25 +375,6 @@ const copySourceSlice = Effect.fn("copyDevDbSourceSlice")(function* (sourcePath:
     }),
   );
   yield* sql`DETACH DATABASE src`;
-});
-
-/** V1 rows are copied before migration, but no migration populates their V2 projections. */
-const ensureLegacyV1DataWasImported = Effect.fn("ensureLegacyV1DataWasImported")(function* (
-  sourcePath: string,
-) {
-  const sql = yield* SqlClient.SqlClient;
-  const [legacy] = yield* sql<{ count: number }>`
-    SELECT COUNT(*) AS count FROM projection_threads
-  `;
-  if ((legacy?.count ?? 0) === 0) return;
-  const [v2] = yield* sql<{ count: number }>`
-    SELECT COUNT(*) AS count FROM orchestration_v2_projection_threads
-  `;
-  if ((v2?.count ?? 0) > 0) return;
-  return yield* new MigrateDevDbLegacyV1DataError({
-    sourcePath,
-    threadCount: Number(legacy?.count ?? 0),
-  });
 });
 
 const pruneSnapshot = Effect.fn("pruneDevDbSnapshot")(function* (input: RunMigrateDevDbInput) {
@@ -573,7 +588,11 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     yield* Console.log(`Copying visible threads from ${sourcePath} (read-only)...`);
     yield* copySourceSlice(sourcePath).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
-      wrapPhase("snapshot", sourcePath),
+      Effect.mapError((cause) =>
+        isMigrateDevDbLegacyV1DataError(cause)
+          ? cause
+          : new MigrateDevDbPhaseError({ phase: "snapshot", databasePath: sourcePath, cause }),
+      ),
     );
 
     // Migrate before pruning: a source older than this checkout would
@@ -587,12 +606,6 @@ export const runMigrateDevDb = Effect.fn("runMigrateDevDb")(function* (
     }).pipe(
       Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
       wrapPhase("migrate", snapshotPath),
-    );
-
-    // Migration 055 creates the V2 tables but the V1 importer normally runs during server boot.
-    // Refuse before pruning the copied V1 rows or replacing the existing worktree database.
-    yield* ensureLegacyV1DataWasImported(sourcePath).pipe(
-      Effect.provide(NodeSqliteClient.layer({ filename: snapshotPath })),
     );
 
     // Verify while the snapshot is still the only thing touched: a slot

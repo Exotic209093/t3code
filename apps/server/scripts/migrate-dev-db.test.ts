@@ -273,6 +273,111 @@ it.layer(NodeServices.layer)("migrate-dev-db", (it) => {
     }),
   );
 
+  it.effect("refuses unimported V1 data when the source already has V2 tables", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({ prefix: "migrate-dev-db-v1-modern-" });
+      const destDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-v1-modern-dest-",
+      });
+      const source = path.join(sourceDir, "userdata", "statev2.sqlite");
+      yield* fs.makeDirectory(path.dirname(source), { recursive: true });
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations();
+          yield* sql`INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+            VALUES ('legacy-project', 'Legacy', '/tmp/legacy', '[]', '2026-08-01', '2026-08-01', NULL)`;
+          yield* sql`INSERT INTO projection_threads
+            (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
+            VALUES ('legacy-thread', 'legacy-project', 'Legacy thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', '2026-08-01', '2026-08-01')`;
+        }),
+      );
+
+      const destination = path.join(destDir, "userdata", "statev2.sqlite");
+      yield* fs.makeDirectory(path.dirname(destination), { recursive: true });
+      yield* withDatabase(
+        destination,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations();
+          yield* sql`INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+            VALUES ('existing-project', 'Existing output', '/tmp/existing', '[]', '2026-08-01', '2026-08-01', NULL)`;
+        }),
+      );
+
+      const error = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+        { sharedHome: sourceDir },
+      ).pipe(Effect.flip);
+      assert.instanceOf(error, MigrateDevDbLegacyV1DataError);
+      if (error._tag === "MigrateDevDbLegacyV1DataError") {
+        assert.equal(error.threadCount, 1);
+        assert.equal(error.sourcePath, source);
+      }
+
+      const sourceRows = yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ threadId: string }>`
+            SELECT thread_id AS "threadId" FROM projection_threads`;
+        }),
+      );
+      const destinationRows = yield* withDatabase(
+        destination,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          return yield* sql<{ title: string }>`
+            SELECT title FROM projection_projects WHERE project_id = 'existing-project'`;
+        }),
+      );
+      assert.deepStrictEqual(sourceRows, [{ threadId: "legacy-thread" }]);
+      assert.deepStrictEqual(destinationRows, [{ title: "Existing output" }]);
+    }),
+  );
+
+  it.effect("allows V1 rows represented by hidden V2 projections", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const sourceDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-v1-imported-",
+      });
+      const destDir = yield* fs.makeTempDirectoryScoped({
+        prefix: "migrate-dev-db-v1-imported-dest-",
+      });
+      const source = path.join(sourceDir, "userdata", "statev2.sqlite");
+      yield* fs.makeDirectory(path.dirname(source), { recursive: true });
+      yield* withDatabase(
+        source,
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+          yield* runMigrations();
+          yield* sql`INSERT INTO projection_projects
+            (project_id, title, workspace_root, scripts_json, created_at, updated_at, deleted_at)
+            VALUES ('legacy-project', 'Legacy', '/tmp/legacy', '[]', '2026-08-01', '2026-08-01', NULL)`;
+          yield* sql`INSERT INTO projection_threads
+            (thread_id, project_id, title, model_selection_json, runtime_mode, created_at, updated_at)
+            VALUES ('legacy-thread', 'legacy-project', 'Legacy thread', '{"instanceId":"codex","model":"gpt-5.4"}', 'full-access', '2026-08-01', '2026-08-01')`;
+          yield* sql`INSERT INTO orchestration_v2_projection_threads
+            (thread_id, project_id, title, default_provider, runtime_mode, interaction_mode, created_at, updated_at, payload_json)
+            VALUES ('legacy-thread', 'legacy-project', 'Legacy thread', 'codex', 'full-access', 'default', '2026-08-01', '2026-08-01', '{"deletedAt":"2026-08-02"}')`;
+        }),
+      );
+
+      const result = yield* runMigrateDevDb(
+        { baseDir: destDir, source, projects: 5, threadsPerProject: 10 },
+        { sharedHome: sourceDir },
+      );
+      assert.equal(result.databasePath, path.join(destDir, "userdata", "statev2.sqlite"));
+    }),
+  );
+
   it.effect("fails loudly on a migration slot collision", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
