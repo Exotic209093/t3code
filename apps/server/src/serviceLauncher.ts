@@ -411,6 +411,48 @@ async function runtimeExists(baseDir: string, version: string): Promise<boolean>
   }
 }
 
+/** Reads the install document at the launcher entry point, migrating the
+ * two-field protocol-2 form left by an older updater after its runtime exists. */
+export async function readServiceStateForLauncher(
+  baseDir: string,
+  filePath: string,
+): Promise<ServiceState> {
+  const contents = await NodeFSP.readFile(filePath, "utf8");
+  const state = parseServiceState(contents);
+  if (state !== undefined) return state;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(contents) as unknown;
+  } catch {
+    throw new Error("Service state is invalid or unsupported.");
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new Error("Service state is invalid or unsupported.");
+  }
+  const legacy = parsed as Record<string, unknown>;
+  const keys = Object.keys(legacy);
+  if (
+    keys.length !== 2 ||
+    !keys.includes("protocol") ||
+    !keys.includes("activeVersion") ||
+    legacy.protocol !== 2 ||
+    typeof legacy.activeVersion !== "string" ||
+    !isExactServiceVersion(legacy.activeVersion)
+  ) {
+    throw new Error("Service state is invalid or unsupported.");
+  }
+  if (!(await runtimeExists(baseDir, legacy.activeVersion))) {
+    throw new Error(`Selected t3@${legacy.activeVersion} runtime is missing or incomplete.`);
+  }
+  const migrated = {
+    protocol: SERVICE_LAUNCHER_PROTOCOL,
+    activeVersion: legacy.activeVersion,
+  } satisfies ServiceState;
+  await writeServiceState(filePath, migrated);
+  return migrated;
+}
+
 function terminalUpdate<S extends TerminalStatus>(input: {
   readonly pending: PendingServiceUpdate;
   readonly status: S;
@@ -870,6 +912,6 @@ export async function main(): Promise<void> {
     throw new Error("T3CODE_HOME is required by the T3 Code service launcher.");
   }
   const statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
-  const state = await readServiceState(statePath);
+  const state = await readServiceStateForLauncher(baseDir, statePath);
   await new Launcher(baseDir, state).run();
 }
