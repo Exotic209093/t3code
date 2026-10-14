@@ -18,6 +18,7 @@ import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
+import * as EffectAcpErrors from "effect-acp/errors";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -88,6 +89,38 @@ describe("AntigravityAdapterV2 flavor", () => {
 
   it("exposes Antigravity's /compact command through the v2 compaction path", () => {
     assert.isTrue(flavor.supportsCompaction);
+  });
+
+  it("explains account verification failures without reclassifying other 403s", () => {
+    for (const code of [403, -32603]) {
+      const failure = flavor.promptFailure?.(
+        new EffectAcpErrors.AcpRequestError({
+          code,
+          errorMessage: "request failed (code 403): Verify your account to continue.",
+        }),
+      );
+      assert.equal(
+        failure?.message,
+        "This Antigravity account needs verification. Verify it in the Antigravity CLI, then retry the turn.",
+      );
+      assert.equal(failure?.code, String(code));
+      assert.equal(failure?.class, "provider_error");
+    }
+    assert.equal(
+      flavor.promptFailure?.(
+        new EffectAcpErrors.AcpRequestError({ code: 403, errorMessage: "Forbidden" }),
+      ).message,
+      "Provider turn failed.",
+    );
+    assert.equal(
+      flavor.promptFailure?.(
+        new EffectAcpErrors.AcpRequestError({
+          code: -32000,
+          errorMessage: "request failed (code 403): Verify your account to continue.",
+        }),
+      ).message,
+      "Provider turn failed.",
+    );
   });
 
   it("routes interaction_* permission requests to the question card", () => {

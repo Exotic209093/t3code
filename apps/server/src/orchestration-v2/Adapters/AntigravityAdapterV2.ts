@@ -13,8 +13,10 @@ import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
 import * as Scope from "effect/Scope";
 import * as EffectAcpErrors from "effect-acp/errors";
+import * as Schema from "effect/Schema";
 
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
 import type { AntigravityAuth } from "../../provider/AntigravityAuth.ts";
 import type * as AcpSessionRuntime from "@t3tools/provider-acp/server/AcpSessionRuntime";
 import {
@@ -42,6 +44,19 @@ import {
 } from "@t3tools/provider-acp/server/adapter";
 
 const ANTIGRAVITY_PROVIDER = ProviderDriverKind.make("antigravity");
+const isAcpRequestError = Schema.is(EffectAcpErrors.AcpRequestError);
+
+const isAntigravityAccountVerificationFailure = (
+  cause: unknown,
+): cause is EffectAcpErrors.AcpRequestError =>
+  isAcpRequestError(cause) &&
+  (cause.code === 403 || cause.code === -32603) &&
+  /^request failed \(code 403\): verify your account to continue\.?$/iu.test(
+    cause.errorMessage.trim(),
+  );
+
+const ANTIGRAVITY_ACCOUNT_VERIFICATION_MESSAGE =
+  "This Antigravity account needs verification. Verify it in the Antigravity CLI, then retry the turn.";
 
 const AntigravityProviderCapabilitiesV2 = {
   ...AcpProviderCapabilitiesV2,
@@ -168,6 +183,17 @@ export function makeAntigravityAcpAdapterFlavor(
     runtimeHarness: "Antigravity",
     capabilities: AntigravityProviderCapabilitiesV2,
     makeRuntime,
+    promptFailure: (cause) =>
+      makeProviderFailure({
+        cause,
+        ...(isAntigravityAccountVerificationFailure(cause)
+          ? {
+              message: ANTIGRAVITY_ACCOUNT_VERIFICATION_MESSAGE,
+              code: String(cause.code),
+              class: "provider_error",
+            }
+          : { class: "provider_error" }),
+      }),
     // Loading history replays every tool call; resume restores the session
     // without the replay and is what the official client does.
     preferResumeSession: true,
