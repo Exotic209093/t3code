@@ -272,6 +272,13 @@ function systemdManager(input: {
         command: "systemctl",
         args: ["--user", "enable", BOOT_SERVICE_UNIT_FILE],
       },
+      // A unit parked at start-limit-hit cannot be restarted until systemd's
+      // failed state is cleared. Keep this scoped to our own service.
+      {
+        step: "clearing the failed service state",
+        command: "systemctl",
+        args: ["--user", "reset-failed", BOOT_SERVICE_UNIT_FILE],
+      },
       // Start last. No administrative state write occurs after this succeeds.
       {
         step: "starting the service",

@@ -150,11 +150,15 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     linger: string;
     enabled: boolean;
     active: boolean;
+    startLimitHit: boolean;
+    resetFailed: boolean;
   } = {
     failCommand: undefined,
     linger: "yes",
     enabled: true,
     active: true,
+    startLimitHit: false,
+    resetFailed: false,
   };
   const runner = ProcessRunner.ProcessRunner.of({
     run: Effect.fn("test.run_boot_service_command")(function* (
@@ -167,7 +171,17 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
         control.linger = "yes";
       if (!failed && command === "systemctl --user enable t3code.service") control.enabled = true;
-      if (!failed && command === "systemctl --user restart t3code.service") control.active = true;
+      if (!failed && command === "systemctl --user reset-failed t3code.service") {
+        control.startLimitHit = false;
+        control.resetFailed = true;
+      }
+      if (
+        !failed &&
+        command === "systemctl --user restart t3code.service" &&
+        !control.startLimitHit
+      ) {
+        control.active = true;
+      }
       if (
         control.stateAfterStop !== undefined &&
         (command === "systemctl --user stop t3code.service" ||
@@ -190,7 +204,11 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
                 : "",
         stderr: "",
         code: ChildProcessSpawner.ExitCode(
-          failed || (input.args[1] === "is-active" && !control.active) ? 1 : 0,
+          failed ||
+            (command === "systemctl --user restart t3code.service" && control.startLimitHit) ||
+            (input.args[1] === "is-active" && !control.active)
+            ? 1
+            : 0,
         ),
         timedOut: false,
         stdoutTruncated: false,
@@ -576,6 +594,84 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         "systemctl --user stop t3code.service",
         "systemctl --user daemon-reload",
         "systemctl --user enable t3code.service",
+        "systemctl --user reset-failed t3code.service",
+        "systemctl --user restart t3code.service",
+      ]);
+    }),
+  );
+
+  it.effect("clears a systemd start-limit before restarting the owned service", () =>
+    Effect.gen(function* () {
+      const { service, commands, control } = yield* makeHarness();
+      yield* service.install();
+      commands.length = 0;
+      control.active = false;
+      control.startLimitHit = true;
+      control.resetFailed = false;
+
+      expect(yield* service.restart).toBe(true);
+      expect(control.resetFailed).toBe(true);
+      expect(control.startLimitHit).toBe(false);
+      expect(control.active).toBe(true);
+      expect(
+        commands.filter(
+          (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),
+        ),
+      ).toEqual([
+        "systemctl --user stop t3code.service",
+        "systemctl --user daemon-reload",
+        "systemctl --user enable t3code.service",
+        "systemctl --user reset-failed t3code.service",
+        "systemctl --user restart t3code.service",
+      ]);
+    }),
+  );
+
+  it.effect("clears a parked systemd service when installing with start=true", () =>
+    Effect.gen(function* () {
+      const { service, commands, control } = yield* makeHarness();
+      yield* service.install();
+      commands.length = 0;
+      control.active = false;
+      control.startLimitHit = true;
+      control.resetFailed = false;
+
+      yield* service.install({ start: true });
+
+      expect(control.resetFailed).toBe(true);
+      expect(control.startLimitHit).toBe(false);
+      expect(control.active).toBe(true);
+      expect(
+        commands.filter(
+          (command) => command.startsWith("systemctl ") && !command.includes("show-environment"),
+        ),
+      ).toEqual([
+        "systemctl --user stop t3code.service",
+        "systemctl --user daemon-reload",
+        "systemctl --user enable t3code.service",
+        "systemctl --user reset-failed t3code.service",
+        "systemctl --user restart t3code.service",
+      ]);
+    }),
+  );
+
+  it.effect("reports a reset-failed command error and still attempts recovery", () =>
+    Effect.gen(function* () {
+      const { service, commands, control } = yield* makeHarness();
+      yield* service.install();
+      commands.length = 0;
+      control.failCommand = "systemctl --user reset-failed t3code.service";
+
+      const error = yield* service.restart.pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "BootServiceCommandError",
+        step: "clearing the failed service state",
+      });
+      expect(commands).toEqual([
+        "systemctl --user stop t3code.service",
+        "systemctl --user daemon-reload",
+        "systemctl --user enable t3code.service",
+        "systemctl --user reset-failed t3code.service",
         "systemctl --user restart t3code.service",
       ]);
     }),
