@@ -22,6 +22,7 @@ import {
   compareExactServiceVersions,
   decodeServiceLauncherChildMessage,
   isExactServiceVersion,
+  parseLegacyServiceState,
   parseServiceState,
   SERVICE_LAUNCHER_CONTEXT_ENV,
   SERVICE_LAUNCHER_PROTOCOL,
@@ -421,25 +422,8 @@ export async function readServiceStateForLauncher(
   const state = parseServiceState(contents);
   if (state !== undefined) return state;
 
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(contents) as unknown;
-  } catch {
-    throw new Error("Service state is invalid or unsupported.");
-  }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
-    throw new Error("Service state is invalid or unsupported.");
-  }
-  const legacy = parsed as Record<string, unknown>;
-  const keys = Object.keys(legacy);
-  if (
-    keys.length !== 2 ||
-    !keys.includes("protocol") ||
-    !keys.includes("activeVersion") ||
-    legacy.protocol !== 2 ||
-    typeof legacy.activeVersion !== "string" ||
-    !isExactServiceVersion(legacy.activeVersion)
-  ) {
+  const legacy = parseLegacyServiceState(contents);
+  if (legacy === undefined) {
     throw new Error("Service state is invalid or unsupported.");
   }
   if (!(await runtimeExists(baseDir, legacy.activeVersion))) {
