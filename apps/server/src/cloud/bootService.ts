@@ -33,6 +33,9 @@ import {
 
 const BOOT_SERVICE_NAME = "t3code";
 const BOOT_SERVICE_UNIT_FILE = `${BOOT_SERVICE_NAME}.service`;
+// Systemd expands this exact-match glob only over loaded units, so an unloaded
+// unit has no failed state to reset.
+const BOOT_SERVICE_RESET_FAILED_PATTERN = "[t]3code.service";
 // `.service` suffix keeps the label distinct from the desktop app's bundle id
 // (com.t3tools.t3code), so launchd and TCC records never collide.
 const BOOT_SERVICE_LAUNCHD_LABEL = "com.t3tools.t3code.service";
@@ -267,7 +270,7 @@ function systemdManager(input: {
       {
         step: "clearing the failed service state",
         command: "systemctl",
-        args: ["--user", "reset-failed", BOOT_SERVICE_UNIT_FILE],
+        args: ["--user", "reset-failed", BOOT_SERVICE_RESET_FAILED_PATTERN],
       },
     ],
     activate: [
