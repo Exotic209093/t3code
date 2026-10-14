@@ -416,6 +416,20 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       }),
   );
 
+  it.effect("does not reset an un-loaded systemd unit on a fresh install", () =>
+    Effect.gen(function* () {
+      const { service, commands, control } = yield* makeHarness();
+      // systemd can reject reset-failed before a fresh unit has been loaded;
+      // a first install must not issue that command at all.
+      control.failCommand = "systemctl --user reset-failed t3code.service";
+
+      yield* service.install();
+
+      expect(control.active).toBe(true);
+      expect(commands).not.toContain("systemctl --user reset-failed t3code.service");
+    }),
+  );
+
   it.effect("reports an unknown version for invalid service state", () =>
     Effect.gen(function* () {
       const { service, fs, statePath } = yield* makeHarness();
@@ -592,9 +606,9 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         ),
       ).toEqual([
         "systemctl --user stop t3code.service",
+        "systemctl --user reset-failed t3code.service",
         "systemctl --user daemon-reload",
         "systemctl --user enable t3code.service",
-        "systemctl --user reset-failed t3code.service",
         "systemctl --user restart t3code.service",
       ]);
     }),
@@ -619,9 +633,9 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         ),
       ).toEqual([
         "systemctl --user stop t3code.service",
+        "systemctl --user reset-failed t3code.service",
         "systemctl --user daemon-reload",
         "systemctl --user enable t3code.service",
-        "systemctl --user reset-failed t3code.service",
         "systemctl --user restart t3code.service",
       ]);
     }),
@@ -647,9 +661,9 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         ),
       ).toEqual([
         "systemctl --user stop t3code.service",
+        "systemctl --user reset-failed t3code.service",
         "systemctl --user daemon-reload",
         "systemctl --user enable t3code.service",
-        "systemctl --user reset-failed t3code.service",
         "systemctl --user restart t3code.service",
       ]);
     }),
@@ -669,8 +683,6 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
       });
       expect(commands).toEqual([
         "systemctl --user stop t3code.service",
-        "systemctl --user daemon-reload",
-        "systemctl --user enable t3code.service",
         "systemctl --user reset-failed t3code.service",
         "systemctl --user restart t3code.service",
       ]);
@@ -706,6 +718,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         ),
       ).toEqual([
         "systemctl --user stop t3code.service",
+        "systemctl --user reset-failed t3code.service",
         "systemctl --user daemon-reload",
         "systemctl --user restart t3code.service",
       ]);
@@ -727,6 +740,7 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         ),
       ).toEqual([
         "systemctl --user stop t3code.service",
+        "systemctl --user reset-failed t3code.service",
         "systemctl --user daemon-reload",
         "systemctl --user restart t3code.service",
       ]);
