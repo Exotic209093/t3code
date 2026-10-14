@@ -46,6 +46,7 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Queue from "effect/Queue";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
@@ -1138,6 +1139,23 @@ describe("AcpAdapterV2", () => {
                         },
                       },
                     },
+                    ...Array.from({ length: chunks }, (_, index) => ({
+                      sessionUpdate: "agent_message_chunk" as const,
+                      messageId: "root-assistant",
+                      content: { type: "text" as const, text: `root-${index + 1} ` },
+                    })),
+                    ...Array.from({ length: chunks }, (_, index) => ({
+                      sessionUpdate: "agent_thought_chunk" as const,
+                      content: { type: "text" as const, text: `thought-${index + 1} ` },
+                    })),
+                    ...Array.from({ length: chunks }, (_, index) => ({
+                      sessionUpdate: "agent_message_chunk" as const,
+                      messageId: "child-assistant",
+                      content: { type: "text" as const, text: `child-${index + 1} ` },
+                      _meta: {
+                        "cognition.ai/subagent_context": { parentAgentId: "child-a" },
+                      },
+                    })),
                     ...streamedWrite("root-write"),
                     ...streamedWrite("child-write", "child-a"),
                     // Same-length output replacements are still live output.
@@ -1205,12 +1223,66 @@ describe("AcpAdapterV2", () => {
           now: yield* DateTime.now,
         }),
       );
-      const items = Array.from(
+      const events = Array.from(
         yield* runtime.events.pipe(
           Stream.takeUntil((event) => event.type === "turn.terminal"),
           Stream.runCollect,
         ),
-      ).flatMap((event) => (event.type === "turn_item.updated" ? [event.turnItem] : []));
+      );
+      const items = events.flatMap((event) =>
+        event.type === "turn_item.updated" ? [event.turnItem] : [],
+      );
+      const assistantSnapshots = items.flatMap((item) =>
+        item.type === "assistant_message" &&
+        item.nativeItemRef?.nativeId?.includes("root-assistant")
+          ? [item]
+          : [],
+      );
+      assert.isAtMost(assistantSnapshots.length, 10, "text snapshots must be coalesced");
+      assert.equal(
+        assistantSnapshots.at(-1)?.text ?? "",
+        Array.from({ length: chunks }, (_, index) => `root-${index + 1} `).join(""),
+        "root assistant text must flush the complete snapshot",
+      );
+      assert.equal(assistantSnapshots.at(-1)?.status, "completed");
+      const childAssistantSnapshots = items.flatMap((item) =>
+        item.type === "assistant_message" &&
+        item.nativeItemRef?.nativeId?.includes("child-assistant")
+          ? [item]
+          : [],
+      );
+      assert.isAtMost(childAssistantSnapshots.length, 10, "child text snapshots must be coalesced");
+      assert.equal(
+        childAssistantSnapshots.at(-1)?.text ?? "",
+        Array.from({ length: chunks }, (_, index) => `child-${index + 1} `).join(""),
+        "child assistant text must flush before terminal",
+      );
+      const reasoningSnapshots = items.filter((item) => item.type === "reasoning");
+      assert.isAtMost(reasoningSnapshots.length, 10, "reasoning snapshots must be coalesced");
+      assert.equal(
+        reasoningSnapshots.at(-1)?.text ?? "",
+        Array.from({ length: chunks }, (_, index) => `thought-${index + 1} `).join(""),
+        "reasoning text must flush before terminal",
+      );
+      assert.equal(reasoningSnapshots.at(-1)?.status, "completed");
+      const childTextIndex = events.findLastIndex(
+        (event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "assistant_message" &&
+          event.turnItem.nativeItemRef?.nativeId?.includes("child-assistant") === true,
+      );
+      const childCompletionIndex = events.findIndex(
+        (event) =>
+          event.type === "subagent.updated" &&
+          event.subagent.childThreadId === childAssistantSnapshots.at(-1)?.threadId &&
+          event.subagent.status === "completed",
+      );
+      assert.isAtLeast(childTextIndex, 0);
+      assert.isAbove(
+        childCompletionIndex,
+        childTextIndex,
+        "child text must precede task completion",
+      );
       for (const toolCallId of ["root-write", "child-write"]) {
         const writes = items.filter((item) => item.nativeItemRef?.nativeId?.endsWith(toolCallId));
         assert.isAtLeast(writes.length, chunks / 10, toolCallId);
@@ -1230,6 +1302,163 @@ describe("AcpAdapterV2", () => {
           );
         }
       }
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
+  it.effect("flushes pending root and child text when the session scope closes", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      let handler: Parameters<Runtime["handleSessionUpdate"]>[0] | undefined;
+      const updatesSent = yield* Deferred.make<void>();
+      const promptGate = yield* Deferred.make<void>();
+      const rootFlushed = yield* Deferred.make<void>();
+      const childFlushed = yield* Deferred.make<void>();
+      const reasoningFlushed = yield* Deferred.make<void>();
+      const rootText = yield* Ref.make<string | null>(null);
+      const childText = yield* Ref.make<string | null>(null);
+      const reasoningText = yield* Ref.make<string | null>(null);
+      const instanceId = ProviderInstanceId.make("acp-scope-close-flush");
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          normalizeSessionUpdate: normalizeDevinSessionUpdate,
+          normalizeToolCall: normalizeDevinToolCall,
+          extractSubagentUpdate: extractDevinSubagentUpdate,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner,
+            mockAgentPath,
+            wrapRuntime: (runtime) => ({
+              ...runtime,
+              handleSessionUpdate: (next) =>
+                Effect.sync(() => {
+                  handler = next;
+                }).pipe(Effect.andThen(runtime.handleSessionUpdate(next))),
+              prompt: () =>
+                Effect.gen(function* () {
+                  yield* handler!({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "tool_call_update",
+                      toolCallId: "scope-child",
+                      status: "in_progress",
+                      _meta: {
+                        "cognition.ai/subagent_started": {
+                          agentId: "scope-child",
+                          title: "Scope child",
+                          task: "Keep working",
+                        },
+                      },
+                    },
+                  });
+                  yield* handler!({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "agent_message_chunk",
+                      messageId: "scope-root",
+                      content: { type: "text", text: "root pending" },
+                    },
+                  });
+                  yield* handler!({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "agent_thought_chunk",
+                      content: { type: "text", text: "reasoning pending" },
+                    },
+                  });
+                  yield* handler!({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "agent_message_chunk",
+                      messageId: "scope-child-message",
+                      content: { type: "text", text: "child pending" },
+                      _meta: {
+                        "cognition.ai/subagent_context": { parentAgentId: "scope-child" },
+                      },
+                    },
+                  });
+                  yield* Deferred.succeed(updatesSent, undefined);
+                  return yield* Deferred.await(promptGate).pipe(
+                    Effect.as({ stopReason: "end_turn" as const }),
+                  );
+                }),
+            }),
+          }),
+        },
+      });
+      const threadId = ThreadId.make("thread-acp-scope-close-flush");
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const sessionScope = yield* Scope.make();
+      const runtime = yield* adapter
+        .openSession({
+          threadId,
+          providerSessionId: ProviderSessionId.make("session-acp-scope-close-flush"),
+          modelSelection,
+          runtimePolicy,
+        })
+        .pipe(Effect.provideService(Scope.Scope, sessionScope));
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            if (event.type === "message.updated") {
+              if (event.message.text === "root pending") {
+                yield* Ref.set(rootText, event.message.text);
+                yield* Deferred.succeed(rootFlushed, undefined);
+              } else if (event.message.text === "child pending") {
+                yield* Ref.set(childText, event.message.text);
+                yield* Deferred.succeed(childFlushed, undefined);
+              }
+            } else if (
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "reasoning" &&
+              event.turnItem.text === "reasoning pending"
+            ) {
+              yield* Ref.set(reasoningText, event.turnItem.text);
+              yield* Deferred.succeed(reasoningFlushed, undefined);
+            }
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+        }),
+      );
+      yield* Deferred.await(updatesSent);
+      yield* TestClock.adjust("49 millis");
+      assert.isFalse(yield* Deferred.isDone(childFlushed), "child text must still be buffered");
+      yield* Scope.close(sessionScope, Exit.void);
+
+      yield* Effect.forEach(
+        [rootFlushed, childFlushed, reasoningFlushed],
+        (receipt) => Deferred.await(receipt),
+        { discard: true },
+      );
+      assert.equal(yield* Ref.get(rootText), "root pending");
+      assert.equal(yield* Ref.get(childText), "child pending");
+      assert.equal(yield* Ref.get(reasoningText), "reasoning pending");
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 

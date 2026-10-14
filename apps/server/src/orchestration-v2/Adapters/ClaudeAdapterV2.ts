@@ -1,4 +1,4 @@
-import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
+import { makeProviderTextDeltaCoalescer } from "@t3tools/provider-core/server/ProviderTextDeltaCoalescer";
 import {
   dynamicToolTitle,
   formatReadToolLabel,

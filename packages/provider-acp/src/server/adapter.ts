@@ -58,6 +58,10 @@ import type * as EffectAcpSchema from "effect-acp/compat";
 
 import { formatReadToolLabel, formatSearchToolLabel } from "@t3tools/shared/toolActivity";
 import * as ProviderHost from "@t3tools/provider-core/server/ProviderHost";
+import {
+  makeProviderTextDeltaCoalescer,
+  type ProviderTextDeltaUpdate,
+} from "@t3tools/provider-core/server/ProviderTextDeltaCoalescer";
 import { makeAcpMcpOverAcpBridge, type AcpMcpOverAcpBridge } from "./mcpOverAcpBridge.ts";
 import { mcpToolPresentation } from "@t3tools/provider-core/server/mcpToolPresentation";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
@@ -1456,6 +1460,7 @@ interface SnapshotMessageState {
 }
 
 const TOOL_UPDATE_PERSIST_EVERY = 10;
+const ACP_TEXT_DELTA_FLUSH_INTERVAL_MS = 50;
 
 /**
  * Some agents stream a tool's arguments (a file write's diff, `rawInput`) and
@@ -2221,6 +2226,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           return ordinal;
         };
 
+        type RootTextSegment = {
+          readonly context: ActiveAcpTurn;
+          readonly kind: "assistant" | "reasoning";
+          readonly nativeItemId: string;
+          readonly turnId: string;
+        };
+        type SubagentTextSegment = {
+          readonly subagent: ActiveAcpSubagent;
+          readonly nativeItemId: string;
+          readonly turnId: string;
+        };
+        const rootTextSegments = new Map<string, RootTextSegment>();
+        const subagentTextSegments = new Map<string, SubagentTextSegment>();
+        const rootTextKey = (turnId: string, nativeItemId: string) =>
+          `root:${turnId}:${nativeItemId}`;
+        const subagentTextKey = (turnId: string, nativeItemId: string) =>
+          `subagent:${turnId}:${nativeItemId}`;
+
         const emitProviderRetry = Effect.fnUntraced(function* (
           context: ActiveAcpTurn,
           status: "running" | "completed" | "interrupted" | "cancelled",
@@ -2414,10 +2437,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           context: ActiveAcpTurn,
           kind: "user" | "assistant" | "reasoning",
           completed: boolean,
+          textOverride?: string,
         ) {
           const stream = textStreamFor(context, kind);
           const segment = stream.current;
           if (segment === null) return;
+          const text = textOverride ?? segment.text;
           const now = yield* DateTime.now;
           const ordinal = yield* resolveItemOrdinal(context, segment.nativeItemId);
           const nodeId = providerNodeId(segment.nativeItemId);
@@ -2461,7 +2486,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               runId: context.input.runId,
               nodeId: messageNodeId,
               role: kind,
-              text: segment.text,
+              text,
               attachments: [],
               streaming: !completed,
               createdAt: segment.startedAt,
@@ -2493,7 +2518,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       type: "user_message",
                       messageId,
                       inputIntent: "turn_start",
-                      text: segment.text,
+                      text,
                       attachments: [],
                     },
                   }
@@ -2517,7 +2542,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
                       updatedAt: now,
                       type: "assistant_message",
                       messageId,
-                      text: segment.text,
+                      text,
                       streaming: !completed,
                     },
                   },
@@ -2544,7 +2569,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               completedAt: completed ? now : null,
               updatedAt: now,
               type: "reasoning",
-              text: segment.text,
+              text,
               streaming: !completed,
             },
           });
@@ -2556,7 +2581,19 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
         ) {
           const stream = textStreamFor(context, kind);
           if (stream.current === null) return;
-          yield* emitTextSegment(context, kind, true);
+          const segment = stream.current;
+          if (kind === "user") {
+            yield* emitTextSegment(context, kind, true);
+          } else {
+            const turnId = String(context.providerTurnId);
+            const key = rootTextKey(turnId, segment.nativeItemId);
+            yield* textDeltas.complete({
+              turnId,
+              itemId: key,
+              finalText: segment.text,
+            });
+            rootTextSegments.delete(key);
+          }
           stream.current = null;
         });
 
@@ -2604,7 +2641,23 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             stream.current.sourceMessageId = sourceMessageId;
           }
           stream.current.text += text;
-          yield* emitTextSegment(context, kind, false);
+          if (kind === "user") {
+            yield* emitTextSegment(context, kind, false);
+          } else {
+            const turnId = String(context.providerTurnId);
+            const key = rootTextKey(turnId, stream.current.nativeItemId);
+            rootTextSegments.set(key, {
+              context,
+              kind,
+              nativeItemId: stream.current.nativeItemId,
+              turnId,
+            });
+            yield* textDeltas.append({
+              turnId,
+              itemId: key,
+              delta: text,
+            });
+          }
         });
 
         const replaceText = Effect.fnUntraced(function* (
@@ -2630,7 +2683,24 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           } else {
             stream.current.text = text;
           }
-          yield* emitTextSegment(context, kind, false);
+          if (kind === "user") {
+            yield* emitTextSegment(context, kind, false);
+          } else {
+            const turnId = String(context.providerTurnId);
+            const key = rootTextKey(turnId, stream.current.nativeItemId);
+            rootTextSegments.set(key, {
+              context,
+              kind,
+              nativeItemId: stream.current.nativeItemId,
+              turnId,
+            });
+            yield* textDeltas.setText({
+              turnId,
+              itemId: key,
+              text,
+            });
+            yield* textDeltas.flushItem({ turnId, itemId: key });
+          }
         });
 
         const emitSubagentAssistant = Effect.fnUntraced(function* (
@@ -2645,27 +2715,35 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           const messageText = mode === "replace" ? text : `${previous}${text}`;
           subagent.assistantMessages.set(nativeItemId, messageText);
           subagent.assistantText = messageText;
-          const now = yield* DateTime.now;
-          const ordinal = resolveSubagentChildOrdinal(subagent, nativeItemId);
-          const artifacts = makeSubagentConversationArtifacts({
-            messageId: providerMessageId(nativeItemId),
-            turnItemId: providerTurnItemId(nativeItemId),
-            threadId: subagent.childThreadId,
-            rootNodeId: subagent.childRootNodeId,
-            providerThreadId: subagent.task.providerThreadId,
-            providerTurnId: null,
-            nativeItemRef: { driver, nativeId: nativeItemId, strength: "weak" },
-            role: "assistant",
-            text: subagent.assistantText,
-            ordinal,
-            now,
-          });
-          yield* emitProviderEvent({ type: "message.updated", driver, message: artifacts.message });
-          yield* emitProviderEvent({
-            type: "turn_item.updated",
-            driver,
-            turnItem: artifacts.turnItem,
-          });
+          const turnId = String(subagent.providerTurnId);
+          const key = subagentTextKey(turnId, nativeItemId);
+          // A new native message id starts a new child segment. Complete any
+          // older buffered segment before the replacement can be projected.
+          for (const [previousKey, previousSegment] of subagentTextSegments) {
+            if (
+              previousSegment.subagent !== subagent ||
+              previousSegment.nativeItemId === nativeItemId
+            ) {
+              continue;
+            }
+            const previousText = subagent.assistantMessages.get(previousSegment.nativeItemId) ?? "";
+            yield* textDeltas.complete({
+              turnId: previousSegment.turnId,
+              itemId: previousKey,
+              finalText: previousText,
+              emitEmpty: false,
+            });
+            subagentTextSegments.delete(previousKey);
+          }
+          subagentTextSegments.set(key, { subagent, nativeItemId, turnId });
+          if (mode === "replace") {
+            yield* textDeltas.setText({ turnId, itemId: key, text: messageText });
+            // Full ACP snapshots retain the old immediate projection semantics while
+            // subsequent token chunks remain bounded by the coalescing interval.
+            yield* textDeltas.flushItem({ turnId, itemId: key });
+          } else {
+            yield* textDeltas.append({ turnId, itemId: key, delta: text });
+          }
         });
 
         const projectSubagentNotification = Effect.fnUntraced(function* (
@@ -2688,6 +2766,77 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               .join("\n");
             yield* emitSubagentAssistant(subagent, text, "replace", update.messageId);
           }
+        });
+
+        const emitCoalescedText = Effect.fnUntraced(function* (update: ProviderTextDeltaUpdate) {
+          const root = rootTextSegments.get(update.itemId);
+          if (root !== undefined) {
+            const current = textStreamFor(root.context, root.kind).current;
+            if (root.turnId !== update.turnId || current?.nativeItemId !== root.nativeItemId) {
+              return;
+            }
+            yield* emitTextSegment(root.context, root.kind, update.completed, update.text);
+            return;
+          }
+          const child = subagentTextSegments.get(update.itemId);
+          if (
+            child === undefined ||
+            child.turnId !== update.turnId ||
+            !child.subagent.assistantMessages.has(child.nativeItemId)
+          )
+            return;
+          const now = yield* DateTime.now;
+          const ordinal = resolveSubagentChildOrdinal(child.subagent, child.nativeItemId);
+          const artifacts = makeSubagentConversationArtifacts({
+            messageId: providerMessageId(child.nativeItemId),
+            turnItemId: providerTurnItemId(child.nativeItemId),
+            threadId: child.subagent.childThreadId,
+            rootNodeId: child.subagent.childRootNodeId,
+            providerThreadId: child.subagent.task.providerThreadId,
+            providerTurnId: null,
+            nativeItemRef: { driver, nativeId: child.nativeItemId, strength: "weak" },
+            role: "assistant",
+            text: update.text,
+            ordinal,
+            now,
+          });
+          yield* emitProviderEvent({ type: "message.updated", driver, message: artifacts.message });
+          yield* emitProviderEvent({
+            type: "turn_item.updated",
+            driver,
+            turnItem: artifacts.turnItem,
+          });
+        });
+
+        const textDeltas = yield* makeProviderTextDeltaCoalescer({
+          flushIntervalMs: ACP_TEXT_DELTA_FLUSH_INTERVAL_MS,
+          emit: emitCoalescedText,
+        });
+        const flushSubagentAssistant = Effect.fnUntraced(function* (subagent: ActiveAcpSubagent) {
+          for (const [key, segment] of subagentTextSegments) {
+            if (segment.subagent !== subagent) continue;
+            const text = subagent.assistantMessages.get(segment.nativeItemId) ?? "";
+            yield* textDeltas.complete({
+              turnId: String(subagent.providerTurnId),
+              itemId: key,
+              finalText: text,
+              emitEmpty: false,
+            });
+            subagentTextSegments.delete(key);
+          }
+        });
+        const flushBufferedText = Effect.fnUntraced(function* () {
+          const context = yield* Ref.get(activeTurn);
+          if (context !== null) yield* closeTextStreams(context);
+          const subagents = new Set<ActiveAcpSubagent>();
+          if (context !== null) {
+            for (const subagent of context.subagents.values()) subagents.add(subagent);
+          }
+          const carryover = yield* Ref.get(carryoverSubagents);
+          if (carryover !== null) {
+            for (const subagent of carryover.subagents) subagents.add(subagent);
+          }
+          for (const subagent of subagents) yield* flushSubagentAssistant(subagent);
         });
 
         const emitSubagent = Effect.fnUntraced(function* (
@@ -2884,6 +3033,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             update.result !== null
           ) {
             yield* emitSubagentAssistant(subagent, update.result);
+          }
+          if (updateIsTerminal) {
+            yield* flushSubagentAssistant(subagent);
           }
           const result = update.result ?? subagent.task.result ?? (subagent.assistantText || null);
           subagent.task = {
@@ -5144,6 +5296,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           resultOverride?: string | null,
         ) {
           yield* mutateCarryoverSubagentStatus(subagent, status, resultOverride);
+          if (acpSubagentStatusIsTerminal(status)) {
+            yield* flushSubagentAssistant(subagent);
+          }
           const now = subagent.task.updatedAt;
           const nativeTaskId = subagent.task.nativeTaskRef?.nativeId ?? subagent.task.id;
           const nativeItemRef = {
@@ -7268,6 +7423,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
+            // Flush through the coalescer's synchronous completion path before transport
+            // and runtime teardown below; timer cancellation cannot discard this state.
+            yield* flushBufferedText();
             yield* continuationPermit.withPermit(
               Effect.gen(function* () {
                 yield* Ref.set(continuationClosed, true);

@@ -4,7 +4,7 @@ import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudge
 import {
   makeProviderTextDeltaCoalescer,
   type ProviderTextDeltaUpdate,
-} from "./ProviderTextDeltaCoalescer.ts";
+} from "@t3tools/provider-core/server/ProviderTextDeltaCoalescer";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
@@ -244,6 +244,31 @@ describe("CodexAdapterV2 assistant message streaming", () => {
           turnId: "turn-1",
           itemId: "message-1",
           text: "one two three",
+          completed: false,
+        },
+      ]);
+    }),
+  );
+
+  it.effect("replaces buffered text for authoritative snapshots", () =>
+    Effect.gen(function* () {
+      const updates = yield* Ref.make<ReadonlyArray<ProviderTextDeltaUpdate>>([]);
+      const coalescer = yield* makeProviderTextDeltaCoalescer({
+        flushIntervalMs: 50,
+        emit: (update) => Ref.update(updates, (current) => [...current, update]),
+      });
+
+      yield* coalescer.append({ turnId: "turn-1", itemId: "message-1", delta: "stale" });
+      yield* coalescer.setText({ turnId: "turn-1", itemId: "message-1", text: "authoritative" });
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("50 millis");
+      yield* Effect.yieldNow;
+
+      assert.deepEqual(yield* Ref.get(updates), [
+        {
+          turnId: "turn-1",
+          itemId: "message-1",
+          text: "authoritative",
           completed: false,
         },
       ]);

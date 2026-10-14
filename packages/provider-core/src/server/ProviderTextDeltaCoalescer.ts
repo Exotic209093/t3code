@@ -17,6 +17,15 @@ export interface ProviderTextDeltaCoalescer {
     readonly itemId: string;
     readonly delta: string;
   }) => Effect.Effect<void>;
+  readonly setText: (input: {
+    readonly turnId: string;
+    readonly itemId: string;
+    readonly text: string;
+  }) => Effect.Effect<void>;
+  readonly flushItem: (input: {
+    readonly turnId: string;
+    readonly itemId: string;
+  }) => Effect.Effect<void>;
   readonly complete: (input: {
     readonly turnId: string;
     readonly itemId: string;
@@ -96,38 +105,46 @@ export const makeProviderTextDeltaCoalescer = Effect.fn("makeProviderTextDeltaCo
       releaseSchedule: true,
     });
 
+    const bufferText = (turnId: string, itemId: string, update: (text: string) => string) =>
+      Effect.uninterruptible(
+        Effect.gen(function* () {
+          const shouldSchedule = yield* flushLock.withPermit(
+            Effect.gen(function* () {
+              yield* Ref.update(buffered, (current) => {
+                const key = providerTextBufferKey(turnId, itemId);
+                const existing = current.get(key);
+                const next = new Map(current);
+                next.set(key, {
+                  turnId,
+                  itemId,
+                  text: update(existing?.text ?? ""),
+                  dirty: true,
+                });
+                return next;
+              });
+              return yield* Ref.modify(flushScheduled, (scheduled) => [!scheduled, true]);
+            }),
+          );
+          if (shouldSchedule) {
+            yield* Effect.sleep(Duration.millis(Math.max(1, input.flushIntervalMs))).pipe(
+              Effect.andThen(flushDirty),
+              Effect.interruptible,
+              Effect.forkIn(coalescerScope),
+            );
+          }
+        }),
+      );
+
     return {
       append: ({ turnId, itemId, delta }) =>
-        delta.length === 0
-          ? Effect.void
-          : Effect.uninterruptible(
-              Effect.gen(function* () {
-                const shouldSchedule = yield* flushLock.withPermit(
-                  Effect.gen(function* () {
-                    yield* Ref.update(buffered, (current) => {
-                      const key = providerTextBufferKey(turnId, itemId);
-                      const existing = current.get(key);
-                      const next = new Map(current);
-                      next.set(key, {
-                        turnId,
-                        itemId,
-                        text: `${existing?.text ?? ""}${delta}`,
-                        dirty: true,
-                      });
-                      return next;
-                    });
-                    return yield* Ref.modify(flushScheduled, (scheduled) => [!scheduled, true]);
-                  }),
-                );
-                if (shouldSchedule) {
-                  yield* Effect.sleep(Duration.millis(Math.max(1, input.flushIntervalMs))).pipe(
-                    Effect.andThen(flushDirty),
-                    Effect.interruptible,
-                    Effect.forkIn(coalescerScope),
-                  );
-                }
-              }),
-            ),
+        delta.length === 0 ? Effect.void : bufferText(turnId, itemId, (text) => text + delta),
+      setText: ({ turnId, itemId, text }) => bufferText(turnId, itemId, () => text),
+      flushItem: ({ turnId, itemId }) =>
+        drain({
+          predicate: (message) => message.turnId === turnId && message.itemId === itemId,
+          completed: false,
+          onlyDirty: false,
+        }),
       complete: ({ turnId, itemId, finalText, emitEmpty = true }) =>
         flushLock.withPermit(
           Effect.gen(function* () {

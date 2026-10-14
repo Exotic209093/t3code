@@ -147,6 +147,10 @@
       "types": "./src/server/snapshotSettings.ts",
       "import": "./src/server/snapshotSettings.ts"
     },
+    "./server/ProviderTextDeltaCoalescer": {
+      "types": "./src/server/ProviderTextDeltaCoalescer.ts",
+      "import": "./src/server/ProviderTextDeltaCoalescer.ts"
+    },
     "./server/subagentProjection": {
       "types": "./src/server/subagentProjection.ts",
       "import": "./src/server/subagentProjection.ts"
