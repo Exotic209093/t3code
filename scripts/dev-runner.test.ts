@@ -1009,7 +1009,9 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
 
         const supervisor = spawned[2];
         assert.equal(supervisor.command, process.execPath);
-        assert.deepStrictEqual(supervisor.args, ["apps/desktop/scripts/dev-electron.mjs"]);
+        assert.deepStrictEqual(supervisor.args, [
+          NodePath.resolve(import.meta.dirname, "../apps/desktop/scripts/dev-electron.mjs"),
+        ]);
         assert.deepStrictEqual(supervisor.options.additionalFds, { fd3: { type: "input" } });
         assert.equal(supervisor.options.env?.T3CODE_DEV_PARENT_LIVENESS, "1");
         assert.equal(supervisor.options.detached, true);

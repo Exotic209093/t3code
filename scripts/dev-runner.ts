@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -30,6 +31,10 @@ const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
 const DESKTOP_DEV_LOOPBACK_HOST = "127.0.0.1";
+const DESKTOP_ELECTRON_SCRIPT = NodePath.resolve(
+  import.meta.dirname,
+  "../apps/desktop/scripts/dev-electron.mjs",
+);
 // HTTP(S) requests to these ports are blocked by the Fetch standard before a
 // browser reaches the network. Keep the complete list here so explicit or
 // future wider offsets cannot produce a URL that curl accepts but browsers
@@ -809,7 +814,7 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
           const spawnCommand = isElectronSupervisor
             ? {
                 command: process.execPath,
-                args: ["apps/desktop/scripts/dev-electron.mjs"],
+                args: [DESKTOP_ELECTRON_SCRIPT],
                 shell: false,
               }
             : yield* resolveSpawnCommand("vp", [...modeArgs, ...input.runArgs], { env });
