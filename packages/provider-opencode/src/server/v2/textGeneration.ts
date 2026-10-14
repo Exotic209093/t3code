@@ -103,7 +103,7 @@ const runOnServer = (
           case "session.execution.failed":
             return Deferred.succeed(outcome, {
               _tag: "failed",
-              detail: "OpenCode could not generate the text.",
+              detail: `OpenCode could not generate the text using ${parsed.providerID}/${parsed.modelID}.`,
               cause: event.data.error,
             });
           case "session.execution.interrupted":
@@ -190,15 +190,18 @@ export const make = Effect.fn("OpenCode2TextGeneration.make")(function* () {
       .withConnection((connection) => runOnServer(connection, input))
       .pipe(
         Effect.provideService(ProviderHost.ProviderHost, host),
-        Effect.mapError((cause) =>
-          isTextGenerationError(cause)
-            ? cause
-            : new TextGenerationError({
-                operation: input.operation,
-                detail: "OpenCode text generation failed.",
-                cause,
-              }),
-        ),
+        Effect.mapError((cause) => {
+          if (isTextGenerationError(cause)) return cause;
+          const parsed = OpenCodeRuntime.parseOpenCodeModelSlug(input.modelSelection.model);
+          const modelLabel = parsed === null ? undefined : `${parsed.providerID}/${parsed.modelID}`;
+          return new TextGenerationError({
+            operation: input.operation,
+            detail: modelLabel
+              ? `OpenCode text generation failed using ${modelLabel}.`
+              : "OpenCode text generation failed.",
+            cause,
+          });
+        }),
         Effect.flatMap((raw) => TextGenerationOperations.decodeJsonReply(input, "OpenCode", raw)),
       );
   return TextGenerationOperations.fromRunner(

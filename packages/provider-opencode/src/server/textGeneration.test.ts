@@ -428,7 +428,9 @@ it.layer(layerOpenCodeTextGenerationTest)("OpenCodeTextGeneration", (it) => {
           .generateCommitMessage(DEFAULT_COMMIT_MESSAGE_INPUT)
           .pipe(Effect.flip);
 
-        expect(error.message).toContain("OpenCode session.prompt request failed.");
+        expect(error.message).toContain(
+          "OpenCode session.prompt request failed using openai/gpt-5.",
+        );
         expect(error.cause).toMatchObject({
           _tag: "OpenCodeTextGenerationPromptRequestError",
           operation: "generateCommitMessage",

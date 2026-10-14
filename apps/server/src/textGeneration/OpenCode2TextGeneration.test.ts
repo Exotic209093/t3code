@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 
 import * as TestProviderHost from "@t3tools/provider-testing/TestProviderHost";
 import * as OpenCode2AdapterV2Testkit from "../orchestration-v2/Adapters/OpenCode2AdapterV2.testkit.ts";
+import * as OpenCodeRuntime from "@t3tools/provider-opencode/server/OpenCodeRuntime";
 import * as OpenCode2Server from "@t3tools/provider-opencode/server/v2/OpenCode2Server";
 import * as OpenCode2TextGeneration from "@t3tools/provider-opencode/server/v2/textGeneration";
 import { OPENCODE2_TITLE_GENERATION } from "./OpenCode2TextGeneration.fixture.ts";
@@ -180,8 +181,40 @@ it.layer(layer)("OpenCode2TextGeneration", (it) => {
           },
         })
         .pipe(Effect.flip);
-      assert.equal(failure.detail, "OpenCode could not generate the text.");
+      assert.equal(
+        failure.detail,
+        "OpenCode could not generate the text using opencode/big-pickle.",
+      );
       assert.deepEqual(failure.cause, refusal);
+    }).pipe(Effect.scoped),
+  );
+
+  it.effect("names the selected model when the OpenCode server call fails", () =>
+    Effect.gen(function* () {
+      const server = OpenCode2Server.OpenCode2Server.of({
+        withConnection: () =>
+          Effect.fail(
+            new OpenCodeRuntime.OpenCodeRuntimeError({
+              operation: "server.connect",
+              detail: "server request failed",
+            }),
+          ),
+      });
+      const textGeneration = yield* OpenCode2TextGeneration.make().pipe(
+        Effect.provideService(OpenCode2Server.OpenCode2Server, server),
+      );
+      const failure = yield* textGeneration
+        .generateThreadTitle({
+          cwd: process.cwd(),
+          message: "fix the login redirect loop after oauth",
+          modelSelection: {
+            instanceId: ProviderInstanceId.make("opencode"),
+            model: "opencode/big-pickle",
+          },
+        })
+        .pipe(Effect.flip);
+      assert.equal(failure.detail, "OpenCode text generation failed using opencode/big-pickle.");
+      assert.instanceOf(failure.cause, OpenCodeRuntime.OpenCodeRuntimeError);
     }).pipe(Effect.scoped),
   );
 

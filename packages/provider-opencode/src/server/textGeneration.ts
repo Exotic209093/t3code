@@ -269,7 +269,7 @@ export const makeOpenCodeTextGeneration = Effect.fn("makeOpenCodeTextGeneration"
           Effect.fail(
             new TextGenerationError({
               operation: cause.operation,
-              detail: "OpenCode session.prompt request failed.",
+              detail: `OpenCode session.prompt request failed using ${cause.providerId}/${cause.modelId}.`,
               cause,
             }),
           ),
