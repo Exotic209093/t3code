@@ -10,13 +10,10 @@ import { describe, expect, it } from "vite-plus/test";
 describe.skipIf(process.platform === "win32")("dev-runner parent liveness", () => {
   it("unwinds the runner and supervisor when the outer owner is hard-killed", async () => {
     const runnerModuleUrl = NodeURL.pathToFileURL(
-      NodePath.resolve(import.meta.dirname, "dev-runner-parent-liveness.ts"),
+      NodePath.resolve(import.meta.dirname, "../../../scripts/dev-runner-parent-liveness.ts"),
     ).href;
     const supervisorModuleUrl = NodeURL.pathToFileURL(
-      NodePath.resolve(
-        import.meta.dirname,
-        "../apps/desktop/scripts/dev-electron-parent-liveness.mjs",
-      ),
+      NodePath.resolve(import.meta.dirname, "dev-electron-parent-liveness.mjs"),
     ).href;
     const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-parent-liveness-"));
     const supervisorMarker = NodePath.join(directory, "supervisor-exit");

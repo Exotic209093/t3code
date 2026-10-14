@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import * as NodeOS from "node:os";
-import * as NodePath from "node:path";
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
@@ -31,10 +30,6 @@ const BASE_WEB_PORT = 5733;
 const MAX_HASH_OFFSET = 3000;
 const MAX_PORT = 65535;
 const DESKTOP_DEV_LOOPBACK_HOST = "127.0.0.1";
-const DESKTOP_ELECTRON_SCRIPT = NodePath.resolve(
-  import.meta.dirname,
-  "../apps/desktop/scripts/dev-electron.mjs",
-);
 // HTTP(S) requests to these ports are blocked by the Fetch standard before a
 // browser reaches the network. Keep the complete list here so explicit or
 // future wider offsets cannot produce a URL that curl accepts but browsers
@@ -806,13 +801,18 @@ export function runDevRunnerWithInput(input: DevRunnerCliInput) {
     const modeCommands = MODE_COMMANDS[input.mode];
     const exitIsTerminal = modeCommands.length > 1;
     const hostPlatform = yield* HostProcess.Platform;
+    const path = yield* Path.Path;
+    const desktopElectronScript = path.resolve(
+      import.meta.dirname,
+      "../apps/desktop/scripts/dev-electron.mjs",
+    );
     yield* Effect.all(
       modeCommands.map((modeArgs) =>
         Effect.gen(function* () {
           const isElectronSupervisor =
             input.mode === "dev:desktop" && modeArgs.at(-1) === "dev:electron";
           const args = isElectronSupervisor
-            ? [DESKTOP_ELECTRON_SCRIPT]
+            ? [desktopElectronScript]
             : [...modeArgs, ...input.runArgs];
           const spawnCommand = isElectronSupervisor
             ? {
@@ -950,15 +950,12 @@ const cliRuntimeLayer = Layer.mergeAll(
 );
 
 if (import.meta.main) {
-  const stopParentLiveness = watchParentLiveness({
-    onParentExit: () => {
-      process.kill(process.pid, "SIGTERM");
-    },
-  });
-  Command.run(devRunnerCli, { version: "0.0.0" }).pipe(
-    Effect.scoped,
-    Effect.ensuring(Effect.sync(stopParentLiveness)),
-    Effect.provide(cliRuntimeLayer),
-    NodeRuntime.runMain,
-  );
+  Effect.gen(function* () {
+    yield* watchParentLiveness({
+      onParentExit: () => {
+        process.kill(process.pid, "SIGTERM");
+      },
+    }).pipe(Effect.forkScoped);
+    yield* Command.run(devRunnerCli, { version: "0.0.0" });
+  }).pipe(Effect.scoped, Effect.provide(cliRuntimeLayer), NodeRuntime.runMain);
 }

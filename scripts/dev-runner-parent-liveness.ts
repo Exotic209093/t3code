@@ -1,4 +1,6 @@
-import * as NodeTimers from "node:timers";
+import * as Duration from "effect/Duration";
+import * as Effect from "effect/Effect";
+import * as Schedule from "effect/Schedule";
 
 export interface ParentLivenessOptions {
   readonly intervalMs?: number;
@@ -29,18 +31,22 @@ export function isParentAlive(
  * cannot pass the supervisor's liveness pipe through to this runner, so this
  * is the portable fallback for that one process boundary.
  */
-export function watchParentLiveness(options: ParentLivenessOptions): () => void {
+export function watchParentLiveness(options: ParentLivenessOptions): Effect.Effect<void> {
   const initialParentPid = options.initialParentPid ?? process.ppid;
   const getParentPid = options.getParentPid ?? (() => process.ppid);
   const parentIsAlive = options.isParentAlive ?? isParentAlive;
-  const interval = NodeTimers.setInterval(() => {
+  return Effect.sync(() => {
     if (getParentPid() === initialParentPid && parentIsAlive(initialParentPid)) {
-      return;
+      return true;
     }
 
-    NodeTimers.clearInterval(interval);
     options.onParentExit();
-  }, options.intervalMs ?? 250);
-  interval.unref();
-  return () => NodeTimers.clearInterval(interval);
+    return false;
+  }).pipe(
+    Effect.repeat({
+      schedule: Schedule.spaced(Duration.millis(options.intervalMs ?? 250)),
+      while: (parentIsAlive) => parentIsAlive,
+    }),
+    Effect.asVoid,
+  );
 }

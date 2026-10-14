@@ -1008,6 +1008,7 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         );
 
         const supervisor = spawned[2];
+        assert.ok(supervisor);
         assert.equal(supervisor.command, process.execPath);
         assert.deepStrictEqual(supervisor.args, [
           NodePath.resolve(import.meta.dirname, "../apps/desktop/scripts/dev-electron.mjs"),
@@ -1045,27 +1046,19 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     it.effect("stops when the outer parent PID disappears", () =>
       Effect.gen(function* () {
         let observedParentPid = 41;
-        let stop: (() => void) | undefined;
         let parentExitCount = 0;
-        yield* Effect.promise(
-          () =>
-            new Promise<void>((resolve) => {
-              stop = watchParentLiveness({
-                intervalMs: 1,
-                initialParentPid: 41,
-                getParentPid: () => {
-                  observedParentPid = 42;
-                  return observedParentPid;
-                },
-                isParentAlive: () => true,
-                onParentExit: () => {
-                  parentExitCount += 1;
-                  stop?.();
-                  resolve();
-                },
-              });
-            }),
-        );
+        yield* watchParentLiveness({
+          intervalMs: 1,
+          initialParentPid: 41,
+          getParentPid: () => {
+            observedParentPid = 42;
+            return observedParentPid;
+          },
+          isParentAlive: () => true,
+          onParentExit: () => {
+            parentExitCount += 1;
+          },
+        });
 
         assert.equal(observedParentPid, 42);
         assert.equal(parentExitCount, 1);
