@@ -445,8 +445,10 @@ export async function readServiceStateForLauncher(
   if (!(await runtimeExists(baseDir, legacy.activeVersion))) {
     throw new Error(`Selected t3@${legacy.activeVersion} runtime is missing or incomplete.`);
   }
+  // This adoption is specific to protocol 2 -> 3. A future protocol bump must
+  // revalidate compatibility before rewriting an older install document.
   const migrated = {
-    protocol: SERVICE_LAUNCHER_PROTOCOL,
+    protocol: 3,
     activeVersion: legacy.activeVersion,
   } satisfies ServiceState;
   await writeServiceState(filePath, migrated);
