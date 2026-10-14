@@ -79,6 +79,16 @@ describe("T3 browser developer instructions", () => {
       NodeAssert.match(instructions, /t3-code/);
       NodeAssert.match(instructions, /preview_status/);
       NodeAssert.match(instructions, /preview_open/);
+      NodeAssert.match(instructions, /cua_repl/);
+      NodeAssert.match(
+        instructions,
+        /bundled Computer Use.*cua_repl.*IAB.*merely because the preview/,
+      );
+      NodeAssert.match(instructions, /unified-computer-use@openai-bundled/);
+      NodeAssert.match(instructions, /Browser is not available: iab/);
+      NodeAssert.match(instructions, /native app workflows/);
+      NodeAssert.match(instructions, /preview_open.*unsupported\/unavailable/);
+      NodeAssert.match(instructions, /failed twice on the same step/);
       NodeAssert.match(instructions, /Do not switch to global browser skills/);
     }
   });
@@ -88,6 +98,8 @@ describe("T3 browser developer instructions", () => {
       const instructions = toolInstructions(runtime, false);
       NodeAssert.doesNotMatch(instructions, /preview_status/);
       NodeAssert.doesNotMatch(instructions, /preview_open/);
+      NodeAssert.doesNotMatch(instructions, /cua_repl/);
+      NodeAssert.doesNotMatch(instructions, /Browser is not available: iab/);
       NodeAssert.doesNotMatch(instructions, /T3 Code collaborative browser/);
       // Steering away from other browser automation must go with the tools;
       // keeping it would leave the model talked out of its only option.
