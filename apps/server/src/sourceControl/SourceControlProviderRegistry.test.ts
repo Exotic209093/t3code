@@ -222,19 +222,16 @@ it.effect("routes authenticated self-hosted GitLab remotes without relying on ho
     const registry = yield* makeRegistry({
       remotes: [{ name: "origin", url: "https://self-hosted.example.test/group/project.git" }],
       process: {
-        run: () =>
-          Effect.succeed(
-            processOutput(
-              `gitlab.com
-  x gitlab.com: API call failed: 401 Unauthorized
-  ! No token found
-self-hosted.example.test
-  ✓ Logged in to self-hosted.example.test as gitlab-user
-  ✓ Token found: ******
-`,
-              { exitCode: ChildProcessSpawner.ExitCode(1) },
-            ),
-          ),
+        run: (input) => {
+          assert.deepStrictEqual(input.args, [
+            "config",
+            "get",
+            "user",
+            "--host",
+            "self-hosted.example.test",
+          ]);
+          return Effect.succeed(processOutput("gitlab-user\n"));
+        },
       },
     });
 
