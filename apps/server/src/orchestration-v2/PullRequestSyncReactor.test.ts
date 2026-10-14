@@ -663,6 +663,208 @@ describe("PullRequestSyncReactor", () => {
     ),
   );
 
+  it.effect("repairs a Bitbucket merged snapshot that is missing its terminal timestamp", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("merged", {
+              pullRequests: [
+                makeLink(
+                  1,
+                  { state: "merged", mergedAt: null },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/1",
+                  },
+                ),
+              ],
+            }),
+          ]),
+          summary: (input) =>
+            Effect.succeed(makeSummary(input, { state: "merged", mergedAt: NOW })),
+        });
+
+        yield* Effect.gen(function* () {
+          yield* startAndSweep(fixture);
+
+          assert.deepStrictEqual(
+            (yield* Ref.get(fixture.summaryCalls)).map((call) => call.host),
+            ["bitbucket.org"],
+          );
+          assert.equal((yield* Ref.get(fixture.syncCommands))[0]?.snapshot.mergedAt, NOW);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("bounds Bitbucket terminal timestamp repairs when the host keeps returning null", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("merged", {
+              pullRequests: [
+                makeLink(
+                  1,
+                  { state: "merged", mergedAt: null },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/1",
+                  },
+                ),
+              ],
+            }),
+          ]),
+          summary: (input) =>
+            Effect.succeed(makeSummary(input, { state: "merged", mergedAt: null })),
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          for (let attempt = 0; attempt < 45; attempt += 1) yield* sweepAgain(fixture, reactor);
+
+          assert.strictEqual((yield* Ref.get(fixture.summaryCalls)).length, 3);
+
+          // An explicit refresh remains forceful after automatic repair attempts are capped.
+          yield* reactor.requestSync({
+            host: "bitbucket.org",
+            repository: "owner/repository",
+            number: 1,
+          });
+          yield* Queue.take(fixture.snapshotReads);
+          yield* reactor.drain;
+          assert.strictEqual((yield* Ref.get(fixture.summaryCalls)).length, 4);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("bounds Bitbucket terminal timestamp repairs after an activity lookup failure", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("merged", {
+              pullRequests: [
+                makeLink(
+                  1,
+                  { state: "merged", mergedAt: null },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/1",
+                  },
+                ),
+              ],
+            }),
+          ]),
+          summary: () =>
+            Effect.fail(
+              new PullRequestOperationError({
+                operation: "summary",
+                detail: "activity lookup failed",
+              }),
+            ),
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          for (let attempt = 0; attempt < 45; attempt += 1) yield* sweepAgain(fixture, reactor);
+
+          assert.strictEqual((yield* Ref.get(fixture.summaryCalls)).length, 3);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("keeps the repair budget after a timestamp read cannot be persisted", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("merged", {
+              pullRequests: [
+                makeLink(
+                  1,
+                  { state: "merged", mergedAt: null },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/1",
+                  },
+                ),
+              ],
+            }),
+          ]),
+          summary: (input) =>
+            Effect.succeed(makeSummary(input, { state: "merged", mergedAt: NOW })),
+          stack: () =>
+            Effect.fail(
+              new PullRequestOperationError({
+                operation: "stack",
+                detail: "stack lookup failed",
+              }),
+            ),
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          for (let attempt = 0; attempt < 45; attempt += 1) yield* sweepAgain(fixture, reactor);
+
+          assert.strictEqual((yield* Ref.get(fixture.summaryCalls)).length, 3);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
+  it.effect("keeps refreshing an open link in a mixed Bitbucket pull request group", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        yield* TestClock.setTime(Date.parse(NOW));
+        const fixture = yield* makeHarness({
+          snapshot: makeSnapshot([
+            makeThread("merged", {
+              pullRequests: [
+                makeLink(
+                  1,
+                  { state: "merged", mergedAt: null },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/1",
+                  },
+                ),
+              ],
+            }),
+            makeThread("open", {
+              pullRequests: [
+                makeLink(
+                  1,
+                  { state: "open" },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/1",
+                  },
+                ),
+              ],
+            }),
+          ]),
+          summary: (input) =>
+            Effect.succeed(makeSummary(input, { state: "merged", mergedAt: null })),
+        });
+
+        yield* Effect.gen(function* () {
+          const reactor = yield* startAndSweep(fixture);
+          for (let attempt = 0; attempt < 3; attempt += 1) yield* sweepAgain(fixture, reactor);
+
+          assert.strictEqual((yield* Ref.get(fixture.summaryCalls)).length, 4);
+        }).pipe(Effect.provide(fixture.layer));
+      }),
+    ),
+  );
+
   it.effect("syncs a pull request a reader saw merge without waiting for the sweep", () =>
     Effect.scoped(
       Effect.gen(function* () {
@@ -713,7 +915,18 @@ describe("PullRequestSyncReactor", () => {
         const state = yield* Ref.make<"closed" | "open">("closed");
         const fixture = yield* makeHarness({
           snapshot: makeSnapshot([
-            makeThread("closed", { pullRequests: [makeLink(2, { state: "closed" })] }),
+            makeThread("closed", {
+              pullRequests: [
+                makeLink(
+                  2,
+                  { state: "closed" },
+                  {
+                    host: "bitbucket.org",
+                    url: "https://bitbucket.org/workspace/repository/pull-requests/2",
+                  },
+                ),
+              ],
+            }),
           ]),
           summary: (input) =>
             Ref.get(state).pipe(Effect.map((state) => makeSummary(input, { state }))),

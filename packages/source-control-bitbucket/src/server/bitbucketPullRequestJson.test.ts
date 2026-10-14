@@ -7,6 +7,7 @@ import {
   decodeConflictsJson,
   decodeDiffstatJson,
   decodePullRequestJson,
+  decodePullRequestActivityJson,
   decodePullRequestPageJson,
   decodeRepositoryPermissionJson,
   decodeStatusesJson,
@@ -181,6 +182,43 @@ describe("decodePullRequestJson", () => {
       reviewState: "approved",
       createdAt: "2026-06-17T09:00:00.000Z",
     });
+  });
+});
+
+describe("decodePullRequestActivityJson", () => {
+  it("keeps update state and date in Bitbucket's newest-first order", () => {
+    const decoded = expectSuccess(
+      decodePullRequestActivityJson(
+        page(
+          [
+            {
+              update: {
+                state: "MERGED",
+                date: "2019-03-21T22:28:28.973484+00:00",
+                changes: { title: { old: "before", new: "after" } },
+              },
+            },
+            { approval: { date: "2019-03-21T22:27:00+00:00" } },
+            { update: { state: "OPEN", date: "2019-03-20T22:28:28+00:00" } },
+            { update: { state: null, date: null } },
+          ],
+          { next: "https://api.bitbucket.org/2.0/activity?page=2" },
+        ),
+      ),
+    );
+
+    expect(decoded.updates).toEqual([
+      { state: "MERGED", date: "2019-03-21T22:28:28.973484+00:00", malformed: false },
+      { state: "OPEN", date: "2019-03-20T22:28:28+00:00", malformed: false },
+      { state: null, date: null, malformed: true },
+    ]);
+    expect(decoded.next).toBe("https://api.bitbucket.org/2.0/activity?page=2");
+  });
+
+  it("fails when Bitbucket did not answer with a page", () => {
+    expect(Result.isFailure(decodePullRequestActivityJson(JSON.stringify({ error: "nope" })))).toBe(
+      true,
+    );
   });
 });
 

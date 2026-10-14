@@ -743,6 +743,144 @@ layer("BitbucketPullRequestApi.layer", (it) => {
     }),
   );
 
+  it.effect("reads the current closed episode and stops at its older boundary", () =>
+    Effect.gen(function* () {
+      const next = "https://api.bitbucket.org/2.0/activity?page=2";
+      mockedRequest.mockReturnValueOnce(
+        Effect.succeed(
+          response(
+            valuePage(
+              [
+                { update: { state: "DECLINED", date: "2026-07-04T00:00:00+00:00" } },
+                { update: { state: "DECLINED", date: "2026-07-03T00:00:00+00:00" } },
+                { update: { state: "OPEN", date: "2026-07-02T00:00:00+00:00" } },
+                { update: { state: "DECLINED", date: "2026-07-01T00:00:00+00:00" } },
+              ],
+              next,
+            ),
+          ),
+        ),
+      );
+      const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
+
+      const timestamps = yield* api.getPullRequestTerminalTimestamps({
+        repository: "acme/web",
+        number: 7,
+        state: "closed",
+      });
+
+      expect(timestamps).toEqual({
+        closedAt: "2026-07-03T00:00:00.000Z",
+        mergedAt: null,
+      });
+      expect(callAt(0).url).toBe(
+        "/repositories/acme/web/pullrequests/7/activity?pagelen=50&fields=next%2Cvalues.update.state%2Cvalues.update.date",
+      );
+      expect(mockedRequest.mock.calls).toHaveLength(1);
+    }),
+  );
+
+  it.effect("does not use a later metadata date after an invalid terminal transition", () =>
+    Effect.gen(function* () {
+      mockedRequest.mockReturnValueOnce(
+        Effect.succeed(
+          response(
+            valuePage([
+              { update: { state: "MERGED", date: "not-a-date" } },
+              { update: { state: "MERGED", date: "2026-07-04T00:00:00+00:00" } },
+            ]),
+          ),
+        ),
+      );
+      const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
+
+      const timestamps = yield* api.getPullRequestTerminalTimestamps({
+        repository: "acme/web",
+        number: 7,
+        state: "merged",
+      });
+
+      expect(timestamps).toEqual({ mergedAt: null, closedAt: null });
+      expect(mockedRequest.mock.calls).toHaveLength(1);
+    }),
+  );
+
+  it.effect("does not use an older terminal episode after a newer open state", () =>
+    Effect.gen(function* () {
+      mockedRequest.mockReturnValueOnce(
+        Effect.succeed(
+          response(
+            valuePage(
+              [
+                { update: { state: "OPEN", date: "2026-07-05T00:00:00+00:00" } },
+                { update: { state: "DECLINED", date: "2026-07-04T00:00:00+00:00" } },
+              ],
+              "https://api.bitbucket.org/2.0/activity?page=older",
+            ),
+          ),
+        ),
+      );
+      const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
+
+      const timestamps = yield* api.getPullRequestTerminalTimestamps({
+        repository: "acme/web",
+        number: 7,
+        state: "closed",
+      });
+
+      expect(timestamps).toEqual({ mergedAt: null, closedAt: null });
+      expect(mockedRequest.mock.calls).toHaveLength(1);
+    }),
+  );
+
+  it.effect("does not use an older merged episode after a newer declined state", () =>
+    Effect.gen(function* () {
+      mockedRequest.mockReturnValueOnce(
+        Effect.succeed(
+          response(
+            valuePage([
+              { update: { state: "DECLINED", date: "2026-07-05T00:00:00+00:00" } },
+              { update: { state: "MERGED", date: "2026-07-04T00:00:00+00:00" } },
+            ]),
+          ),
+        ),
+      );
+      const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
+
+      const timestamps = yield* api.getPullRequestTerminalTimestamps({
+        repository: "acme/web",
+        number: 7,
+        state: "merged",
+      });
+
+      expect(timestamps).toEqual({ mergedAt: null, closedAt: null });
+      expect(mockedRequest.mock.calls).toHaveLength(1);
+    }),
+  );
+
+  it.effect("leaves terminal times unknown when activity history is bounded", () =>
+    Effect.gen(function* () {
+      const next = "https://api.bitbucket.org/2.0/activity?page=next";
+      mockedRequest.mockReturnValue(
+        Effect.succeed(
+          response(
+            valuePage([{ update: { state: "MERGED", date: "2026-07-04T00:00:00+00:00" } }], next),
+          ),
+        ),
+      );
+      const api = yield* BitbucketPullRequestApi.BitbucketPullRequestApi;
+
+      const timestamps = yield* api.getPullRequestTerminalTimestamps({
+        repository: "acme/web",
+        number: 7,
+        state: "merged",
+      });
+
+      expect(timestamps).toEqual({ mergedAt: null, closedAt: null });
+      expect(mockedRequest.mock.calls).toHaveLength(10);
+    }),
+  );
+
   it.effect("states a failure once, without stacking one message inside another", () =>
     Effect.gen(function* () {
       mockedRequest.mockReturnValueOnce(

@@ -1,9 +1,11 @@
 import * as Cache from "effect/Cache";
 import * as Context from "effect/Context";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Result from "effect/Result";
 import * as Schema from "effect/Schema";
 import type {
@@ -30,6 +32,7 @@ import {
   decodeConflictsJson,
   decodeDiffstatJson,
   decodePullRequestJson,
+  decodePullRequestActivityJson,
   decodePullRequestPageJson,
   decodeRepositoryPermissionJson,
   decodeStatusesJson,
@@ -37,6 +40,7 @@ import {
   decodeWorkspaceMembersJson,
   type BitbucketDiffStat,
   type BitbucketPullRequest,
+  type BitbucketPullRequestActivityUpdate,
   type BitbucketRawComment,
 } from "./bitbucketPullRequestJson.ts";
 import type { ProviderListCursor } from "@t3tools/source-control-core/server/PullRequestProvider";
@@ -137,6 +141,10 @@ const CONVERSATION_PAGE_SIZE = 50;
  * and an end to a walk whose only other stop is Bitbucket running out.
  */
 const CONVERSATION_PAGES = 10;
+/** Activity history is only useful while its current terminal episode is still unambiguous. */
+const ACTIVITY_PAGES = 10;
+/** Activity entries are heterogeneous; only the cursor and state-change fields are needed here. */
+const ACTIVITY_FIELDS = "next,values.update.state,values.update.date";
 /** The same ceiling the gh and glab diff reads use. */
 const DIFF_MAX_BYTES = 8 * 1024 * 1024;
 /**
@@ -171,6 +179,16 @@ export class BitbucketPullRequestApi extends Context.Service<
       readonly repository: string;
       readonly number: number;
     }) => Effect.Effect<BitbucketPullRequest, BitbucketPullRequestApiError>;
+
+    /** Terminal transition times from the pull request's current activity episode. */
+    readonly getPullRequestTerminalTimestamps: (input: {
+      readonly repository: string;
+      readonly number: number;
+      readonly state: "merged" | "closed";
+    }) => Effect.Effect<
+      { readonly mergedAt: string | null; readonly closedAt: string | null },
+      BitbucketPullRequestApiError
+    >;
 
     /** True where the credentials can write to the repository, which is what merging needs. */
     readonly getRepositoryPermission: (input: {
@@ -536,6 +554,92 @@ export const make = Effect.gen(function* () {
       }),
     );
 
+  const terminalEpisode = (input: {
+    readonly updates: ReadonlyArray<BitbucketPullRequestActivityUpdate>;
+    readonly state: "merged" | "closed";
+    readonly complete: boolean;
+  }): { readonly timestamp: string | null; readonly boundaryKnown: boolean } => {
+    const states =
+      input.state === "merged" ? new Set(["MERGED"]) : new Set(["DECLINED", "SUPERSEDED"]);
+    const episode: Array<string> = [];
+    let uncertain = false;
+    for (const update of input.updates) {
+      if (update.malformed) {
+        // A missing or malformed update can be the transition itself, or metadata newer than it.
+        // Keep the episode unknown rather than settling it from a later, unrelated date.
+        if (episode.length > 0) {
+          return { timestamp: null, boundaryKnown: true };
+        }
+        uncertain = true;
+        continue;
+      }
+      const normalized = update.state?.trim().toUpperCase();
+      if (normalized !== undefined && normalized !== null && states.has(normalized)) {
+        const parsed = update.date === null ? Option.none() : DateTime.make(update.date);
+        if (Option.isNone(parsed)) return { timestamp: null, boundaryKnown: true };
+        if (uncertain) return { timestamp: null, boundaryKnown: true };
+        episode.push(DateTime.formatIso(parsed.value));
+        continue;
+      }
+      if (episode.length > 0) {
+        return { timestamp: episode.at(-1) ?? null, boundaryKnown: true };
+      }
+      // Activity is newest first. A different recognized state before any matching terminal
+      // transition means the detail snapshot and activity read crossed a state change; an older
+      // matching transition cannot safely explain the current detail.
+      return { timestamp: null, boundaryKnown: true };
+    }
+    return {
+      timestamp: !uncertain && input.complete ? (episode.at(-1) ?? null) : null,
+      boundaryKnown: input.complete,
+    };
+  };
+
+  const pullRequestTerminalTimestamps = (input: {
+    readonly repository: string;
+    readonly number: number;
+    readonly state: "merged" | "closed";
+  }): Effect.Effect<
+    { readonly mergedAt: string | null; readonly closedAt: string | null },
+    BitbucketPullRequestApiError
+  > =>
+    withRepository(input.repository, (path) => {
+      const collect = (state: {
+        readonly url: string;
+        readonly page: number;
+        readonly updates: ReadonlyArray<BitbucketPullRequestActivityUpdate>;
+      }): Effect.Effect<{ readonly timestamp: string | null }, BitbucketPullRequestApiError> =>
+        readPage({
+          operation: "getPullRequestActivity",
+          url: state.url,
+          decode: decodePullRequestActivityJson,
+        }).pipe(
+          Effect.flatMap((page) => {
+            const updates = [...state.updates, ...page.updates];
+            const episode = terminalEpisode({
+              updates,
+              state: input.state,
+              complete: page.next === null,
+            });
+            if (!episode.boundaryKnown && page.next !== null && state.page < ACTIVITY_PAGES) {
+              return collect({ url: page.next, page: state.page + 1, updates });
+            }
+            return Effect.succeed({ timestamp: episode.timestamp });
+          }),
+        );
+      return collect({
+        url: `${path}/pullrequests/${input.number}/activity?pagelen=${MAX_PAGE_SIZE}&fields=${encodeURIComponent(ACTIVITY_FIELDS)}`,
+        page: 1,
+        updates: [],
+      }).pipe(
+        Effect.map(({ timestamp }) =>
+          input.state === "merged"
+            ? { mergedAt: timestamp, closedAt: null }
+            : { mergedAt: null, closedAt: timestamp },
+        ),
+      );
+    });
+
   /** Diffstat has one aggregate per page, so its totals are folded while following `next`. */
   const diffStatPages = (input: {
     readonly url: string;
@@ -655,6 +759,8 @@ export const make = Effect.gen(function* () {
           decode: decodePullRequestJson,
         }),
       ),
+
+    getPullRequestTerminalTimestamps: pullRequestTerminalTimestamps,
 
     // Nothing on the repository, the pull request or the workspace states what the credentials
     // may do, so this endpoint is the one request Bitbucket makes unavoidable. It is asked

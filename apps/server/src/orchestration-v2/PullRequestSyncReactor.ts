@@ -37,6 +37,7 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import { isTerminalRunStatus } from "./ThreadManagementService.ts";
 
 const SLOW_SYNC_INTERVAL_MS = 15 * 60 * 1_000;
+const TERMINAL_TIMESTAMP_REPAIR_MAX_ATTEMPTS = 3;
 /** Shell commands that can merge or close a pull request without a merge notification. */
 const PULL_REQUEST_CLOSE_COMMAND = /\b(?:gh\s+pr|glab\s+mr)\s+(?:merge|close)\b/u;
 
@@ -132,6 +133,21 @@ function isUnsettled(thread: ProjectionStore.ProjectionThreadPullRequests): bool
   return thread.settledOverride !== "settled" && thread.settledAt === null;
 }
 
+function hasMissingMergedTimestamp(
+  snapshot:
+    | Pick<ThreadPullRequestSnapshot, "state" | "mergedAt">
+    | SnapshotFields
+    | null
+    | undefined,
+): boolean {
+  return snapshot?.state === "merged" && snapshot.mergedAt == null;
+}
+
+function isBitbucketCloud(entries: ReadonlyArray<LinkEntry>): boolean {
+  const host = entries[0] === undefined ? "" : normalizeThreadPullRequestKey(entries[0].link).host;
+  return host.toLowerCase() === "bitbucket.org";
+}
+
 /**
  * Keeps every thread ↔ pull request link's host snapshot current. One sweep a minute reads
  * only the active threads that have links, groups visible links by pull request so the host
@@ -162,6 +178,10 @@ export const make = Effect.gen(function* () {
   const lastSyncedAt = new Map<string, number>();
   const requested = new Map<string, number>();
   let requestGeneration = 0;
+  // Bitbucket's historical snapshots can be terminal without the activity timestamp that
+  // settlement requires. Repair those snapshots a few times at the normal slow cadence, then
+  // leave the timestamp unknown instead of polling a permanently incomplete provider response.
+  const terminalTimestampRepairAttempts = new Map<string, number>();
   // Requested keys wait in `requested` for one queued sweep, so a burst of links (an agent
   // linking dozens of pull requests) is read together and shares the summary batches.
   let requestedSweepQueued = false;
@@ -172,11 +192,30 @@ export const make = Effect.gen(function* () {
   const pausedUntil = new Map<string, number>();
 
   const isDue = (key: string, entries: ReadonlyArray<LinkEntry>, nowMs: number): boolean => {
-    if (requested.has(key) || retryStacks.has(key)) return true;
+    // An explicit refresh is authoritative, including after automatic repair attempts have
+    // been exhausted. Keep this before the bounded automatic path so requestSync never loses
+    // its force contract.
+    if (requested.has(key)) return true;
     if (entries.some((entry) => entry.link.snapshot === null)) return true;
     // Settled threads stop watching their pull requests. Unsettling one makes its links due on
     // the next sweep, since the cadence clock below kept running while it was settled.
     const active = entries.filter((entry) => isUnsettled(entry.thread));
+    const needsMergedTimestampRepair =
+      isBitbucketCloud(entries) &&
+      active.length > 0 &&
+      active.every((entry) => entry.link.snapshot?.state === "merged") &&
+      active.some((entry) => hasMissingMergedTimestamp(entry.link.snapshot));
+    if (needsMergedTimestampRepair) {
+      const attempts = terminalTimestampRepairAttempts.get(key) ?? 0;
+      if (attempts >= TERMINAL_TIMESTAMP_REPAIR_MAX_ATTEMPTS) return false;
+      const last = lastSyncedAt.get(key);
+      // A stack retry caused by this repair still belongs to the bounded slow cadence. Explicit
+      // requestSync is handled above and remains immediate; ordinary stack retries keep their
+      // existing eager behavior below this branch.
+      return last === undefined || nowMs - last >= SLOW_SYNC_INTERVAL_MS;
+    }
+    terminalTimestampRepairAttempts.delete(key);
+    if (retryStacks.has(key)) return true;
     if (active.every((entry) => entry.link.snapshot?.state === "merged")) return false;
     if (active.some((entry) => entry.link.snapshot?.state === "open")) return true;
     // Closed requests can reopen on the host.
@@ -209,6 +248,9 @@ export const make = Effect.gen(function* () {
     for (const key of lastSyncedAt.keys()) if (!groups.has(key)) lastSyncedAt.delete(key);
     for (const key of retryStacks) if (!groups.has(key)) retryStacks.delete(key);
     for (const key of requested.keys()) if (!groups.has(key)) requested.delete(key);
+    for (const key of terminalTimestampRepairAttempts.keys()) {
+      if (!groups.has(key)) terminalTimestampRepairAttempts.delete(key);
+    }
 
     // Layers auto-linked this sweep, so two links of one thread that share a
     // stack do not both try to add the same sibling.
@@ -285,6 +327,21 @@ export const make = Effect.gen(function* () {
         number: first.link.number,
       };
       const generation = requested.get(key);
+      const activeEntries = entries.filter((entry) => isUnsettled(entry.thread));
+      const repairingMergedTimestamp =
+        isBitbucketCloud(entries) &&
+        activeEntries.length > 0 &&
+        activeEntries.every((entry) => entry.link.snapshot?.state === "merged") &&
+        activeEntries.some((entry) => hasMissingMergedTimestamp(entry.link.snapshot));
+      if (repairingMergedTimestamp) {
+        terminalTimestampRepairAttempts.set(
+          key,
+          (terminalTimestampRepairAttempts.get(key) ?? 0) + 1,
+        );
+        // Treat a repair lookup as the cadence's attempt even when the provider fails. This
+        // gives transient activity failures the same bounded backoff as a null response.
+        lastSyncedAt.set(key, nowMs);
+      }
       if (generation !== undefined) yield* pullRequests.invalidate({ reference: ref });
       const summary = yield* pullRequests.summary(ref, { recoverTransientFailure: false });
       const fields = snapshotFieldsOf(summary);
@@ -334,20 +391,28 @@ export const make = Effect.gen(function* () {
       lastSyncedAt.set(key, nowMs);
       // A refresh requested while the host read was in flight belongs to the next sweep.
       if (requested.get(key) === generation) requested.delete(key);
-      yield* Effect.forEach(
+      const syncResults = yield* Effect.forEach(
         entries,
         (entry) =>
           syncEntry(entry, fields, fetchedStack).pipe(
             persistence.withPermits(1),
+            Effect.as(true),
             Effect.catchCause((cause) => {
               if (!Cause.hasInterruptsOnly(cause)) retryStacks.add(key);
               return logSkipped("pull request sync skipped", { threadId: entry.thread.id, key })(
                 cause,
-              );
+              ).pipe(Effect.as(false));
             }),
           ),
-        { discard: true },
+        { discard: false },
       );
+      if (
+        repairingMergedTimestamp &&
+        !hasMissingMergedTimestamp(fields) &&
+        syncResults.every((synced) => synced)
+      ) {
+        terminalTimestampRepairAttempts.delete(key);
+      }
     });
 
     // Failed host reads by reason: how many, and the first key that failed that way.

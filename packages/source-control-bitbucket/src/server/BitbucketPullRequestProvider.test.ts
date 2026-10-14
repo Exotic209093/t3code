@@ -70,6 +70,97 @@ it.effect.each([
   }),
 );
 
+it.effect("maps the current terminal timestamp and only asks activity for terminal requests", () =>
+  Effect.gen(function* () {
+    const pullRequest = Result.getOrThrow(
+      decodePullRequestJson(`{
+        "id": 897, "title": "Merged", "state": "MERGED",
+        "source": { "branch": { "name": "feature" } },
+        "destination": { "branch": { "name": "main" } },
+        "created_on": "2026-09-16T00:00:00Z",
+        "updated_on": "2026-09-16T00:00:00Z",
+        "links": { "html": { "href": "https://bitbucket.org/acme/web/pull-requests/897" } }
+      }`),
+    );
+    let activityCalls = 0;
+    const provider = yield* make.pipe(
+      Effect.provide(
+        Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
+          getPullRequest: () => Effect.succeed(pullRequest),
+          getDiffStat: () => Effect.succeed({ additions: 0, deletions: 0, changedFiles: 0 }),
+          getMergeability: () => Effect.succeed("unknown" as const),
+          listChecks: () => Effect.succeed([]),
+          getRepositoryPermission: () => Effect.succeed(true),
+          getPullRequestTerminalTimestamps: () => {
+            activityCalls += 1;
+            return Effect.succeed({
+              mergedAt: "2026-09-17T00:00:00.000Z",
+              closedAt: "2026-09-18T00:00:00.000Z",
+            });
+          },
+        }),
+      ),
+    );
+
+    const detail = yield* provider.getChangeRequest({
+      cwd: "/repo",
+      repository: "acme/web",
+      host: "bitbucket.org",
+      number: 897,
+    });
+
+    expect(detail).toMatchObject({
+      state: "merged",
+      mergedAt: "2026-09-17T00:00:00.000Z",
+      closedAt: null,
+    });
+    expect(activityCalls).toBe(1);
+  }),
+);
+
+it.effect("keeps a merged request usable when its activity read fails", () =>
+  Effect.gen(function* () {
+    const pullRequest = Result.getOrThrow(
+      decodePullRequestJson(`{
+        "id": 897, "title": "Merged", "state": "MERGED",
+        "source": { "branch": { "name": "feature" } },
+        "destination": { "branch": { "name": "main" } },
+        "created_on": "2026-09-16T00:00:00Z",
+        "updated_on": "2026-09-16T00:00:00Z",
+        "links": { "html": { "href": "https://bitbucket.org/acme/web/pull-requests/897" } }
+      }`),
+    );
+    const provider = yield* make.pipe(
+      Effect.provide(
+        Layer.mock(BitbucketPullRequestApi.BitbucketPullRequestApi)({
+          getPullRequest: () => Effect.succeed(pullRequest),
+          getDiffStat: () => Effect.succeed({ additions: 0, deletions: 0, changedFiles: 0 }),
+          getMergeability: () => Effect.succeed("unknown" as const),
+          listChecks: () => Effect.succeed([]),
+          getRepositoryPermission: () => Effect.succeed(true),
+          getPullRequestTerminalTimestamps: () =>
+            Effect.fail(
+              new BitbucketApi.BitbucketResponseError({
+                operation: "request",
+                status: 403,
+                responseBodyLength: 0,
+              }),
+            ),
+        }),
+      ),
+    );
+
+    const detail = yield* provider.getChangeRequest({
+      cwd: "/repo",
+      repository: "acme/web",
+      host: "bitbucket.org",
+      number: 897,
+    });
+
+    expect(detail).toMatchObject({ state: "merged", mergedAt: null, closedAt: null });
+  }),
+);
+
 for (const operation of [
   "getMergeability",
   "listChecks",

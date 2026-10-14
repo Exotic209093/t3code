@@ -96,6 +96,10 @@ const RawPageSchema = Schema.Struct({
   next: Schema.optional(Schema.NullOr(Schema.String)),
 });
 
+const RawActivityEntrySchema = Schema.Struct({
+  update: Schema.optional(Schema.Unknown),
+});
+
 const RawCommentSchema = Schema.Struct({
   id: Schema.Int,
   content: Schema.optional(Schema.NullOr(Schema.Struct({ raw: Schema.optional(Schema.String) }))),
@@ -200,6 +204,18 @@ export interface BitbucketPullRequest {
   readonly reviewerIds: ReadonlyArray<string>;
   /** Approvals and change requests, which Bitbucket keeps on its participants. */
   readonly reviews: ReadonlyArray<PullRequestComment>;
+}
+
+export interface BitbucketPullRequestActivityUpdate {
+  readonly state: string | null;
+  readonly date: string | null;
+  /** A present update whose state/date could not be trusted. */
+  readonly malformed: boolean;
+}
+
+export interface BitbucketPullRequestActivityPage {
+  readonly updates: ReadonlyArray<BitbucketPullRequestActivityUpdate>;
+  readonly next: string | null;
 }
 
 function trimmed(value: string | null | undefined): string | null {
@@ -314,6 +330,7 @@ function toPullRequest(raw: Schema.Schema.Type<typeof RawPullRequestSchema>): Bi
 }
 
 const decodePage = decodeJsonResult(RawPageSchema);
+const decodeActivityEntry = Schema.decodeUnknownExit(RawActivityEntrySchema);
 const decodePullRequestEntry = Schema.decodeUnknownExit(RawPullRequestSchema);
 const decodePullRequest = decodeJsonResult(RawPullRequestSchema);
 const decodeCommentEntry = Schema.decodeUnknownExit(RawCommentSchema);
@@ -358,6 +375,35 @@ export function decodePullRequestJson(
   return Result.isSuccess(decoded)
     ? Result.succeed(toPullRequest(decoded.success))
     : Result.fail(decoded.failure);
+}
+
+/** Decodes only state changes from Bitbucket's heterogeneous activity stream. */
+export function decodePullRequestActivityJson(
+  raw: string,
+): Result.Result<BitbucketPullRequestActivityPage, DecodeFailure> {
+  const decoded = decodePage(raw);
+  if (!Result.isSuccess(decoded)) {
+    return Result.fail(decoded.failure);
+  }
+  const updates: BitbucketPullRequestActivityUpdate[] = [];
+  for (const entry of decoded.success.values) {
+    const activity = decodeActivityEntry(entry);
+    if (Exit.isFailure(activity)) continue;
+    const update = activity.value.update;
+    if (update === undefined || update === null) continue;
+    if (typeof update !== "object") {
+      updates.push({ state: null, date: null, malformed: true });
+      continue;
+    }
+    const state = Reflect.get(update, "state");
+    const date = Reflect.get(update, "date");
+    updates.push({
+      state: typeof state === "string" ? state : null,
+      date: typeof date === "string" ? date : null,
+      malformed: typeof state !== "string" || typeof date !== "string",
+    });
+  }
+  return Result.succeed({ updates, next: trimmed(decoded.success.next) });
 }
 
 export function decodeViewerJson(raw: string): Result.Result<string | null, DecodeFailure> {

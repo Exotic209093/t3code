@@ -333,6 +333,76 @@ describe("resolveAutoSettlementAt", () => {
     ).toEqual(shell().createdAt);
   });
 
+  it("waits for a missing Bitbucket merge timestamp before settling linked work", () => {
+    const link = {
+      host: "bitbucket.org",
+      repository: "owner/repository",
+      number: 42,
+      url: "https://bitbucket.org/owner/repository/pull-requests/42",
+      source: "manual" as const,
+      linkedAt: DateTime.formatIso(at(-3 * 60 * 60 * 1_000)),
+      snapshot: {
+        state: "merged" as const,
+        title: "Pull request",
+        headBranch: "feature",
+        baseBranch: "main",
+        isDraft: false,
+        updatedAt: DateTime.formatIso(at(-30 * 60 * 1_000)),
+        syncedAt: DateTime.formatIso(at(0)),
+        mergedAt: null,
+      },
+      stack: null,
+    };
+    const thread = shell({
+      latestUserMessageAt: at(-2 * 60 * 60 * 1_000),
+      latestRunCompletedAt: at(-90 * 60 * 1_000),
+      pullRequests: [link],
+    });
+    const input = {
+      thread,
+      pullRequest: null,
+      nowMs: NOW_MS,
+      autoSettleAfterDays: null,
+      autoSettleOnMerge: true,
+    };
+    expect(ThreadSettlementService.resolveAutoSettlementAt(input)).toBeNull();
+    const repaired = {
+      ...link,
+      snapshot: {
+        ...link.snapshot,
+        mergedAt: DateTime.formatIso(at(-60 * 60 * 1_000)),
+      },
+    };
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        thread: { ...thread, pullRequests: [repaired] },
+      }),
+    ).toEqual(at(-90 * 60 * 1_000));
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        thread: {
+          ...thread,
+          pullRequests: [
+            repaired,
+            { ...link, number: 43, snapshot: { ...link.snapshot, state: "open" } },
+          ],
+        },
+      }),
+    ).toBeNull();
+    expect(
+      ThreadSettlementService.resolveAutoSettlementAt({
+        ...input,
+        thread: {
+          ...thread,
+          latestUserAuthoredMessageAt: at(-45 * 60 * 1_000),
+          pullRequests: [repaired],
+        },
+      }),
+    ).toBeNull();
+  });
+
   it("settles on merge after agent-started runs, but not after the user writes again", () => {
     // A background command stopped after the merge and its notification
     // started a run. Only the user's own messages hold a merged thread open.

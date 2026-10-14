@@ -193,9 +193,26 @@ export const make = Effect.gen(function* () {
 
     getChangeRequest: (input) => {
       const target = { repository: input.repository, number: input.number };
+      const pullRequestAndTerminalTimestamps = api.getPullRequest(target).pipe(
+        Effect.flatMap((pullRequest) => {
+          const terminalTimestamps =
+            pullRequest.state === "merged" || pullRequest.state === "closed"
+              ? recoverRead(
+                  api.getPullRequestTerminalTimestamps({ ...target, state: pullRequest.state }),
+                  {
+                    mergedAt: null,
+                    closedAt: null,
+                  },
+                )
+              : Effect.succeed({ mergedAt: null, closedAt: null });
+          return terminalTimestamps.pipe(
+            Effect.map((timestamps) => [pullRequest, timestamps] as const),
+          );
+        }),
+      );
       return Effect.all(
         [
-          api.getPullRequest(target),
+          pullRequestAndTerminalTimestamps,
           api.getDiffStat(target),
           recoverRead(api.getMergeability(target), "unknown" as const),
           recoverRead(api.listChecks(target), []),
@@ -209,7 +226,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(fail("getChangeRequest")),
         Effect.map(
           ([
-            pullRequest,
+            [pullRequest, terminalTimestamps],
             diffStat,
             mergeability,
             checks,
@@ -221,8 +238,8 @@ export const make = Effect.gen(function* () {
             deletions: diffStat.deletions,
             changedFiles: diffStat.changedFiles,
             body: pullRequest.body,
-            mergedAt: null,
-            closedAt: null,
+            mergedAt: pullRequest.state === "merged" ? terminalTimestamps.mergedAt : null,
+            closedAt: pullRequest.state === "closed" ? terminalTimestamps.closedAt : null,
             reviewers: pullRequest.reviewers,
             checks,
             // Bitbucket publishes no per-repository list of allowed strategies, so the ones it
