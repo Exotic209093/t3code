@@ -327,15 +327,12 @@ const readTokenResponse = Effect.fn("cloud.cli_token.read_token_response")(funct
 const isPermanentRefreshStatus = (status: number): boolean =>
   status >= 400 && status < 500 && status !== 408 && status !== 429;
 
-const makeStatusCodeError = (
-  response: HttpClientResponse.HttpClientResponse,
-  oauthErrorCode?: OAuthRefreshErrorCode,
-) =>
+const makeStatusCodeError = (response: HttpClientResponse.HttpClientResponse, cause?: unknown) =>
   new HttpClientError.HttpClientError({
     reason: new HttpClientError.StatusCodeError({
       request: response.request,
       response,
-      ...(oauthErrorCode === undefined ? {} : { cause: oauthErrorCode }),
+      ...(cause === undefined ? {} : { cause }),
     }),
   });
 
@@ -372,7 +369,7 @@ const exchangeToken = Effect.fn("cloud.cli_token.exchange")(function* (
       isRefreshGrant &&
       isPermanentRefreshStatus(responseWithStatus.status) &&
       !isStatusCodeError(cause)
-        ? Effect.fail(makeStatusCodeError(responseWithStatus))
+        ? Effect.fail(makeStatusCodeError(responseWithStatus, cause))
         : Effect.fail(cause),
     ),
   );

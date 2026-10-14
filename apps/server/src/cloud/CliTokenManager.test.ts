@@ -392,9 +392,13 @@ it.effect("only includes an allowlisted OAuth error code in a login prompt", () 
 );
 
 it.effect.each([
-  { name: "malformed", layer: layerRefreshResponse({ status: 400, body: "{" }) },
-  { name: "unreadable", layer: layerUnreadableResponseBody(400) },
-])("keeps the permanent status for a $name refresh error body", ({ layer }) =>
+  {
+    name: "malformed",
+    layer: layerRefreshResponse({ status: 400, body: "{" }),
+    expectedBodyCause: false,
+  },
+  { name: "unreadable", layer: layerUnreadableResponseBody(400), expectedBodyCause: true },
+])("keeps the permanent status for a $name refresh error body", ({ layer, expectedBodyCause }) =>
   Effect.gen(function* () {
     const manager = yield* CliTokenManager.CloudCliTokenManager;
     const error = yield* manager.getExisting.pipe(Effect.flip);
@@ -407,6 +411,21 @@ it.effect.each([
       assert.equal(error.cause.reason._tag, "StatusCodeError");
       if (error.cause.reason._tag === "StatusCodeError") {
         assert.equal(error.cause.reason.response.status, 400);
+        if (expectedBodyCause) {
+          assert.isTrue(HttpClientError.isHttpClientError(error.cause.reason.cause));
+          if (HttpClientError.isHttpClientError(error.cause.reason.cause)) {
+            assert.equal(error.cause.reason.cause.reason._tag, "DecodeError");
+            if (error.cause.reason.cause.reason._tag === "DecodeError") {
+              assert.instanceOf(error.cause.reason.cause.reason.cause, Error);
+              assert.equal(
+                (error.cause.reason.cause.reason.cause as Error).message,
+                "body read failed",
+              );
+            }
+          }
+        } else {
+          assert.isUndefined(error.cause.reason.cause);
+        }
       }
     }
   }).pipe(
@@ -442,6 +461,12 @@ it.effect.each([200, 400])(
       assert.instanceOf(error, CliTokenManager.CloudCliCredentialRefreshError);
       assert.equal(error.requiresLogin, status === 400);
       assert.equal(error.message.includes("t3 connect login"), status === 400);
+      if (status === 400 && HttpClientError.isHttpClientError(error.cause)) {
+        assert.equal(error.cause.reason._tag, "StatusCodeError");
+        if (error.cause.reason._tag === "StatusCodeError") {
+          assert.isTrue(Cause.isTimeoutError(error.cause.reason.cause));
+        }
+      }
       assert.isTrue(yield* Fiber.join(hasCredential));
     }).pipe(
       Effect.provide(
