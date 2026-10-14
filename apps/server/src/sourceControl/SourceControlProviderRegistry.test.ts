@@ -217,7 +217,7 @@ it.effect("routes GitLab remotes to the GitLab provider", () =>
   }),
 );
 
-it.effect("routes authenticated self-hosted GitLab remotes without relying on host naming", () =>
+it.effect("routes self-hosted GitLab remotes from matching host config", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
       remotes: [{ name: "origin", url: "https://self-hosted.example.test/group/project.git" }],
@@ -226,11 +226,11 @@ it.effect("routes authenticated self-hosted GitLab remotes without relying on ho
           assert.deepStrictEqual(input.args, [
             "config",
             "get",
-            "user",
+            "api_host",
             "--host",
             "self-hosted.example.test",
           ]);
-          return Effect.succeed(processOutput("gitlab-user\n"));
+          return Effect.succeed(processOutput("self-hosted.example.test\n"));
         },
       },
     });
@@ -241,17 +241,36 @@ it.effect("routes authenticated self-hosted GitLab remotes without relying on ho
   }),
 );
 
+it.effect("does not refine a self-hosted GitLab remote from unrelated local config", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: "https://self-hosted.example.test/group/project.git" }],
+      process: {
+        run: (input) => {
+          assert.deepStrictEqual(input.args, [
+            "config",
+            "get",
+            "api_host",
+            "--host",
+            "self-hosted.example.test",
+          ]);
+          return Effect.succeed(processOutput("gitlab-user\n"));
+        },
+      },
+    });
+
+    const provider = yield* registry.resolve({ cwd: "/repo" });
+
+    assert.strictEqual(provider.kind, "unknown");
+  }),
+);
+
 it.effect("refines the caller-selected remote instead of choosing another configured remote", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
       remotes: [{ name: "origin", url: "git@github.com:fork/project.git" }],
       process: {
-        run: () =>
-          Effect.succeed(
-            processOutput(`self-hosted.example.test
-  ✓ Logged in to self-hosted.example.test as gitlab-user
-`),
-          ),
+        run: () => Effect.succeed(processOutput("self-hosted.example.test\n")),
       },
     });
 
@@ -278,15 +297,7 @@ it.effect("routes authenticated self-hosted GitLab remotes on non-standard ports
     const registry = yield* makeRegistry({
       remotes: [{ name: "origin", url: "https://self-hosted.example.test:8443/group/project.git" }],
       process: {
-        run: () =>
-          Effect.succeed(
-            processOutput(
-              `self-hosted.example.test:8443
-  ✓ Logged in to self-hosted.example.test:8443 as gitlab-user
-  ✓ Token found: ******
-`,
-            ),
-          ),
+        run: () => Effect.succeed(processOutput("self-hosted.example.test:8443\n")),
       },
     });
 

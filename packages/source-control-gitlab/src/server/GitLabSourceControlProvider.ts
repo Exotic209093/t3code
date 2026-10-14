@@ -80,8 +80,27 @@ function parseGitLabAuth(input: SourceControlAuthProbeInput) {
   });
 }
 
+function normalizeGitLabHost(value: string) {
+  const candidate = value.trim();
+  if (candidate === "" || /\s/u.test(candidate)) return null;
+
+  try {
+    return new URL(
+      candidate.includes("://") ? candidate : `https://${candidate}`,
+    ).host.toLowerCase();
+  } catch {
+    return null;
+  }
+}
+
 function refineUnknownGitLabRemote(input: SourceControlUnknownRemoteRefinementInput) {
-  const authenticated = input.auth.exitCode === 0 && input.auth.stdout.trim().length > 0;
+  const remoteHost = normalizeGitLabHost(gitLabRemoteHost(input.context));
+  const configuredHost = normalizeGitLabHost(input.auth.stdout);
+  const authenticated =
+    input.auth.exitCode === 0 &&
+    remoteHost !== null &&
+    configuredHost !== null &&
+    configuredHost === remoteHost;
 
   if (!authenticated) {
     return null;
@@ -112,7 +131,7 @@ export const discovery = {
   remoteRefinementArgs: ({ context }) => [
     "config",
     "get",
-    "user",
+    "api_host",
     "--host",
     gitLabRemoteHost(context),
   ],

@@ -201,7 +201,7 @@ it("refines unknown GitLab remotes from offline host-scoped config", () => {
     },
     auth: {
       exitCode: ChildProcessSpawner.ExitCode(0),
-      stdout: "gitlab-user\n",
+      stdout: "https://self-hosted.example.test/\n",
       stderr: "",
     },
   });
@@ -221,7 +221,7 @@ it.effect("runs GitLab unknown-remote refinement against local host config", () 
         calls.push({ command: input.command, args: input.args });
         return Effect.succeed({
           exitCode: ChildProcessSpawner.ExitCode(0),
-          stdout: "gitlab-user\n",
+          stdout: "self-hosted.example.test:8443\n",
           stderr: "",
           stdoutTruncated: false,
           stderrTruncated: false,
@@ -247,7 +247,7 @@ it.effect("runs GitLab unknown-remote refinement against local host config", () 
     assert.deepStrictEqual(calls, [
       {
         command: "glab",
-        args: ["config", "get", "user", "--host", "self-hosted.example.test:8443"],
+        args: ["config", "get", "api_host", "--host", "self-hosted.example.test:8443"],
       },
     ]);
     assert.strictEqual(result?.provider.kind, "gitlab");
@@ -256,7 +256,9 @@ it.effect("runs GitLab unknown-remote refinement against local host config", () 
 
 it.each([
   { label: "empty", stdout: "\n", exitCode: 0 },
-  { label: "failed", stdout: "gitlab-user\n", exitCode: 1 },
+  { label: "failed", stdout: "self-hosted.example.test\n", exitCode: 1 },
+  { label: "different host", stdout: "gitlab.com\n", exitCode: 0 },
+  { label: "legacy USER output", stdout: "james\n", exitCode: 0 },
 ])("does not refine a GitLab remote when local host config is $label", ({ stdout, exitCode }) => {
   const provider = GitLabSourceControlProvider.discovery.refineUnknownRemote?.({
     cwd: "/repo",
