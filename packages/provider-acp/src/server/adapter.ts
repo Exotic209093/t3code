@@ -2717,6 +2717,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
           subagent.assistantText = messageText;
           const turnId = String(subagent.providerTurnId);
           const key = subagentTextKey(turnId, nativeItemId);
+          const hasBufferedSegment = subagentTextSegments.has(key);
           // A new native message id starts a new child segment. Complete any
           // older buffered segment before the replacement can be projected.
           for (const [previousKey, previousSegment] of subagentTextSegments) {
@@ -2741,6 +2742,12 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             // Full ACP snapshots retain the old immediate projection semantics while
             // subsequent token chunks remain bounded by the coalescing interval.
             yield* textDeltas.flushItem({ turnId, itemId: key });
+          } else if (!hasBufferedSegment) {
+            // A message id can resume after an earlier segment completed. Seed the
+            // new coalescer entry with the complete retained message before appending
+            // later deltas, otherwise the first resumed snapshot would contain only
+            // the suffix after the prior terminal flush.
+            yield* textDeltas.setText({ turnId, itemId: key, text: messageText });
           } else {
             yield* textDeltas.append({ turnId, itemId: key, delta: text });
           }
@@ -7423,9 +7430,6 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
 
         yield* Effect.addFinalizer(() =>
           Effect.gen(function* () {
-            // Flush through the coalescer's synchronous completion path before transport
-            // and runtime teardown below; timer cancellation cannot discard this state.
-            yield* flushBufferedText();
             yield* continuationPermit.withPermit(
               Effect.gen(function* () {
                 yield* Ref.set(continuationClosed, true);
@@ -7451,6 +7455,9 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
               { discard: true },
             );
             const transportHadOutstandingResponses = yield* closeNativeTransport;
+            // Close admitted transport callbacks first, then synchronously flush any
+            // text they produced before the post-close hook and runtime teardown.
+            yield* flushBufferedText();
             yield* options.testHooks?.afterNativeResponseTransportClosed?.() ?? Effect.void;
             const sessionCapabilities =
               started.initializeResult.agentCapabilities?.sessionCapabilities;

@@ -1462,6 +1462,180 @@ describe("AcpAdapterV2", () => {
     }).pipe(Effect.provide(layerTest), Effect.scoped),
   );
 
+  it.effect("retains a child message prefix when its native message id resumes", () =>
+    Effect.gen(function* () {
+      const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      const path = yield* Path.Path;
+      const mockAgentPath = yield* path.fromFileUrl(
+        new URL("../../../scripts/acp-mock-agent.ts", import.meta.url),
+      );
+      type Runtime = AcpSessionRuntime.AcpSessionRuntime["Service"];
+      let handler: Parameters<Runtime["handleSessionUpdate"]>[0] | undefined;
+      const stageA1 = yield* Deferred.make<void>();
+      const releaseA1 = yield* Deferred.make<void>();
+      const stageA2 = yield* Deferred.make<void>();
+      const releaseA2 = yield* Deferred.make<void>();
+      const a1Flushed = yield* Deferred.make<void>();
+      const a2Projected = yield* Deferred.make<string>();
+      const terminal = yield* Deferred.make<void>();
+      const projectionPhase = yield* Ref.make<"initial" | "awaiting-a2">("initial");
+      const eventLog = yield* Ref.make<ReadonlyArray<ProviderAdapter.ProviderAdapterV2Event>>([]);
+      const instanceId = ProviderInstanceId.make("acp-child-message-resume");
+      const adapter = yield* makeAcpAdapterV2({
+        instanceId,
+        selfInvocation: yield* resolveSelfInvocation(),
+        flavor: {
+          driver: ACP_TEST_DRIVER,
+          capabilities: AcpProviderCapabilitiesV2,
+          normalizeSessionUpdate: normalizeDevinSessionUpdate,
+          normalizeToolCall: normalizeDevinToolCall,
+          extractSubagentUpdate: extractDevinSubagentUpdate,
+          makeRuntime: makeMockRuntime({
+            childProcessSpawner,
+            mockAgentPath,
+            wrapRuntime: (runtime) => ({
+              ...runtime,
+              handleSessionUpdate: (next) =>
+                Effect.sync(() => {
+                  handler = next;
+                }).pipe(Effect.andThen(runtime.handleSessionUpdate(next))),
+              prompt: () =>
+                Effect.gen(function* () {
+                  yield* handler!({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "tool_call_update",
+                      toolCallId: "resume-child",
+                      status: "in_progress",
+                      _meta: {
+                        "cognition.ai/subagent_started": {
+                          agentId: "resume-child",
+                          title: "Resume child",
+                          task: "Keep working",
+                        },
+                      },
+                    },
+                  });
+                  const send = (messageId: string, text: string) =>
+                    handler!({
+                      sessionId: "mock-session-1",
+                      update: {
+                        sessionUpdate: "agent_message_chunk",
+                        messageId,
+                        content: { type: "text", text },
+                        _meta: {
+                          "cognition.ai/subagent_context": { parentAgentId: "resume-child" },
+                        },
+                      },
+                    });
+                  yield* send("message-a", "A1");
+                  yield* Deferred.succeed(stageA1, undefined);
+                  yield* Deferred.await(releaseA1);
+                  yield* send("message-b", "B1");
+                  yield* send("message-a", "A2");
+                  yield* Deferred.succeed(stageA2, undefined);
+                  yield* Deferred.await(releaseA2);
+                  yield* send("message-a", "A3");
+                  yield* handler!({
+                    sessionId: "mock-session-1",
+                    update: {
+                      sessionUpdate: "tool_call_update",
+                      toolCallId: "resume-child",
+                      status: "completed",
+                      _meta: {
+                        "cognition.ai/subagent_completed": {
+                          agentId: "resume-child",
+                          success: true,
+                          summary: "done",
+                        },
+                      },
+                    },
+                  });
+                  return { stopReason: "end_turn" as const };
+                }),
+            }),
+          }),
+        },
+      });
+      const threadId = ThreadId.make("thread-acp-child-message-resume");
+      const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        cwd: process.cwd(),
+      });
+      const modelSelection = { instanceId, model: "default" } as const;
+      const runtime = yield* adapter.openSession({
+        threadId,
+        providerSessionId: ProviderSessionId.make("session-acp-child-message-resume"),
+        modelSelection,
+        runtimePolicy,
+      });
+      const providerThread = yield* runtime.ensureThread({
+        threadId,
+        modelSelection,
+        runtimePolicy,
+      });
+      yield* runtime.events.pipe(
+        Stream.runForEach((event) =>
+          Effect.gen(function* () {
+            yield* Ref.update(eventLog, (current) => [...current, event]);
+            if (
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.nativeItemRef?.nativeId?.includes("message-a")
+            ) {
+              const text = event.turnItem.text;
+              if (text === "A1") {
+                yield* Deferred.succeed(a1Flushed, undefined);
+              } else if ((yield* Ref.get(projectionPhase)) === "awaiting-a2") {
+                yield* Deferred.succeed(a2Projected, text);
+              }
+            } else if (event.type === "turn.terminal") {
+              yield* Deferred.succeed(terminal, undefined);
+            }
+          }),
+        ),
+        Effect.forkScoped,
+      );
+      yield* runtime.startTurn(
+        makeTurnInput({
+          threadId,
+          providerThread,
+          instanceId,
+          runtimePolicy,
+          now: yield* DateTime.now,
+        }),
+      );
+      yield* Deferred.await(stageA1);
+      yield* TestClock.adjust("50 millis");
+      yield* Deferred.await(a1Flushed);
+      const childTexts = () =>
+        Ref.get(eventLog).pipe(
+          Effect.map((events) =>
+            events.flatMap((event) =>
+              event.type === "turn_item.updated" &&
+              event.turnItem.type === "assistant_message" &&
+              event.turnItem.nativeItemRef?.nativeId?.includes("message-a")
+                ? [event.turnItem.text]
+                : [],
+            ),
+          ),
+        );
+      assert.include(yield* childTexts(), "A1");
+      yield* Deferred.succeed(releaseA1, undefined);
+      yield* Deferred.await(stageA2);
+      yield* Ref.set(projectionPhase, "awaiting-a2");
+      yield* TestClock.adjust("50 millis");
+      const projectedA2 = yield* Deferred.await(a2Projected);
+      const resumedTexts = yield* childTexts();
+      assert.notInclude(resumedTexts, "A2", "resumed output must not drop its retained prefix");
+      assert.equal(projectedA2, "A1A2");
+      yield* Deferred.succeed(releaseA2, undefined);
+      yield* Deferred.await(terminal);
+      assert.include(yield* childTexts(), "A1A2A3");
+    }).pipe(Effect.provide(layerTest), Effect.scoped),
+  );
+
   it.effect("keeps Devin parent paragraphs intact while projecting native child work", () =>
     Effect.gen(function* () {
       const childProcessSpawner = yield* ChildProcessSpawner.ChildProcessSpawner;
