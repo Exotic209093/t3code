@@ -195,12 +195,21 @@ export class CloudCliCredentialRemovalError extends Schema.TaggedError<CloudCliC
 
 export class CloudCliCredentialRefreshError extends Schema.TaggedError<CloudCliCredentialRefreshError>()(
   "CloudCliCredentialRefreshError",
-  { cause: Schema.Defect() },
+  {
+    cause: Schema.Defect(),
+    requiresLogin: Schema.optional(Schema.Boolean).pipe(
+      Schema.withConstructorDefault(Effect.succeed(false)),
+    ),
+  },
 ) {
   override get message(): string {
-    return "Could not refresh the T3 Connect CLI credential.";
+    return this.requiresLogin
+      ? "Could not refresh the T3 Connect CLI credential. Run `t3 connect login` to authorize again."
+      : "Could not refresh the T3 Connect CLI credential.";
   }
 }
+
+export const isCloudCliCredentialRefreshError = Schema.is(CloudCliCredentialRefreshError);
 
 export class CloudCliCredentialReadError extends Schema.TaggedError<CloudCliCredentialReadError>()(
   "CloudCliCredentialReadError",
@@ -538,12 +547,28 @@ export const make = Effect.gen(function* () {
     if (token.value.expiresAtEpochMs - CLOUD_CLI_OAUTH_REFRESH_EARLY_MS > now) {
       return token;
     }
-    return Option.some(yield* refresh(token.value).pipe(Effect.flatMap(persist)));
+    return Option.some(
+      // Queue shutdown interruption until the rotated credential is persisted;
+      // exchangeToken's inner 10-second timeout remains interruptible.
+      yield* refresh(token.value).pipe(Effect.flatMap(persist), Effect.uninterruptible),
+    );
   });
 
   const getExisting = semaphore.withPermits(1)(
     getExistingNoLock().pipe(
-      Effect.mapError((cause) => new CloudCliCredentialRefreshError({ cause })),
+      Effect.mapError(
+        (cause) =>
+          new CloudCliCredentialRefreshError({
+            cause,
+            requiresLogin:
+              HttpClientError.isHttpClientError(cause) &&
+              cause.reason._tag === "StatusCodeError" &&
+              cause.reason.response.status >= 400 &&
+              cause.reason.response.status < 500 &&
+              cause.reason.response.status !== 408 &&
+              cause.reason.response.status !== 429,
+          }),
+      ),
       Effect.provide(services),
     ),
   );
