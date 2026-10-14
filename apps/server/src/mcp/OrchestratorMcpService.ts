@@ -59,6 +59,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -931,14 +932,20 @@ const make = Effect.gen(function* () {
   const projectDefaultModelSelection = (
     project: Effect.Success<ReturnType<typeof requireProject>>,
   ) =>
-    project.defaultModelSelection === null
-      ? Effect.fail(
-          failure(
-            "invalid_request",
-            `Project ${project.id} has no default model, so this caller cannot pick one for it.`,
-          ),
-        )
-      : Effect.succeed(project.defaultModelSelection);
+    serverSettings.getSettings.pipe(
+      Effect.mapError((error) => failure("orchestration_error", error.message)),
+      Effect.map((settings) => resolveProjectSettings(settings, project.id, project).settings),
+      Effect.flatMap((settings) =>
+        settings.defaultModelSelection === null
+          ? Effect.fail(
+              failure(
+                "invalid_request",
+                `Project ${project.id} has no default model, so this caller cannot pick one for it.`,
+              ),
+            )
+          : Effect.succeed(settings.defaultModelSelection),
+      ),
+    );
   const secretRequests = yield* SecretRequests.SecretRequests;
 
   const requireCapability = (scope: McpInvocationScope) =>
