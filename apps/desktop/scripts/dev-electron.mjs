@@ -8,6 +8,7 @@ import {
   resolveDevProtocolClient,
   resolveElectronLaunchCommand,
 } from "./electron-launcher.mjs";
+import { watchParentLiveness as watchParentPipe } from "./dev-electron-parent-liveness.mjs";
 import { waitForResources } from "./wait-for-resources.mjs";
 
 const devServerUrl = process.env.VITE_DEV_SERVER_URL?.trim();
@@ -52,6 +53,17 @@ const childTreeGracePeriodMs = 1_200;
 const remoteDebuggingPort = process.env.T3CODE_DESKTOP_REMOTE_DEBUGGING_PORT?.trim();
 // oxlint-disable-next-line t3code/no-global-process-runtime -- Standalone dev script has no Effect runtime.
 const hostPlatform = NodeOS.platform();
+const parentAbortController = new AbortController();
+let parentLivenessStream = null;
+let onParentExitAfterReady = () => {};
+const handleParentExit = () => {
+  parentAbortController.abort();
+  onParentExitAfterReady();
+};
+
+if (process.env.T3CODE_DEV_PARENT_LIVENESS === "1") {
+  parentLivenessStream = watchParentPipe({ onParentExit: handleParentExit });
+}
 
 NodeChildProcess.execFileSync(
   process.execPath,
@@ -59,12 +71,22 @@ NodeChildProcess.execFileSync(
   { stdio: "inherit" },
 );
 
-await waitForResources({
-  baseDir: desktopDir,
-  files: requiredFiles,
-  tcpHost: devServer.hostname,
-  tcpPort: port,
-});
+try {
+  await waitForResources({
+    baseDir: desktopDir,
+    files: requiredFiles,
+    tcpHost: devServer.hostname,
+    tcpPort: port,
+    signal: parentAbortController.signal,
+  });
+} catch (error) {
+  if (parentAbortController.signal.aborted) {
+    parentLivenessStream?.destroy();
+    process.exit(0);
+  }
+
+  throw error;
+}
 
 const childEnv = { ...process.env };
 delete childEnv.ELECTRON_RUN_AS_NODE;
@@ -87,16 +109,6 @@ function killChildTreeByPid(pid, signal) {
   }
 
   NodeChildProcess.spawnSync("pkill", [`-${signal}`, "-P", String(pid)], { stdio: "ignore" });
-}
-
-function cleanupStaleDevApps() {
-  if (hostPlatform === "win32") {
-    return;
-  }
-
-  NodeChildProcess.spawnSync("pkill", ["-f", "--", `--t3code-dev-root=${desktopDir}`], {
-    stdio: "ignore",
-  });
 }
 
 function startApp() {
@@ -165,7 +177,6 @@ async function stopApp() {
     app.once("exit", finish);
     app.kill("SIGTERM");
     killChildTreeByPid(app.pid, "TERM");
-    cleanupStaleDevApps();
 
     setTimeout(() => {
       if (settled) {
@@ -174,7 +185,6 @@ async function stopApp() {
 
       app.kill("SIGKILL");
       killChildTreeByPid(app.pid, "KILL");
-      cleanupStaleDevApps();
       finish();
     }, forcedShutdownTimeoutMs).unref();
   });
@@ -220,6 +230,12 @@ function startWatchers() {
   }
 }
 
+function watchParentLiveness() {
+  if (process.env.T3CODE_DEV_PARENT_LIVENESS === "1" && !parentLivenessStream) {
+    parentLivenessStream = watchParentPipe({ onParentExit: handleParentExit });
+  }
+}
+
 function killChildTree(signal) {
   if (hostPlatform === "win32") {
     return;
@@ -243,6 +259,8 @@ async function shutdown(exitCode) {
   for (const watcher of watchers) {
     watcher.close();
   }
+  parentLivenessStream?.destroy();
+  parentLivenessStream = null;
 
   await stopApp();
   killChildTree("TERM");
@@ -254,8 +272,12 @@ async function shutdown(exitCode) {
   process.exit(exitCode);
 }
 
+onParentExitAfterReady = () => void shutdown(0);
+if (parentAbortController.signal.aborted) {
+  await shutdown(0);
+}
 startWatchers();
-cleanupStaleDevApps();
+watchParentLiveness();
 startApp();
 
 process.once("SIGINT", () => {

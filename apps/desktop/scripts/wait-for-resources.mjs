@@ -14,7 +14,7 @@ async function fileExists(filePath) {
   }
 }
 
-function tcpPortIsReady({ host, port, connectTimeoutMs = 500 }) {
+function tcpPortIsReady({ host, port, connectTimeoutMs = 500, signal }) {
   return new Promise((resolveReady) => {
     const socket = NodeNet.createConnection({ host, port });
     let settled = false;
@@ -26,9 +26,17 @@ function tcpPortIsReady({ host, port, connectTimeoutMs = 500 }) {
 
       settled = true;
       socket.removeAllListeners();
+      signal?.removeEventListener("abort", onAbort);
       socket.destroy();
       resolveReady(ready);
     };
+
+    const onAbort = () => finish(false);
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    signal?.addEventListener("abort", onAbort, { once: true });
 
     socket.once("connect", () => {
       finish(true);
@@ -43,11 +51,30 @@ function tcpPortIsReady({ host, port, connectTimeoutMs = 500 }) {
   });
 }
 
-async function resolvePendingResources({ baseDir, files, tcpPort, tcpHosts, connectTimeoutMs }) {
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+
+  const error = new Error("Waiting for desktop dev resources was aborted");
+  error.name = "AbortError";
+  throw error;
+}
+
+async function resolvePendingResources({
+  baseDir,
+  files,
+  tcpPort,
+  tcpHosts,
+  connectTimeoutMs,
+  signal,
+}) {
   const pendingFiles = [];
 
   for (const relativeFilePath of files) {
+    throwIfAborted(signal);
     const ready = await fileExists(NodePath.resolve(baseDir, relativeFilePath));
+    throwIfAborted(signal);
     if (!ready) {
       pendingFiles.push(relativeFilePath);
     }
@@ -55,11 +82,14 @@ async function resolvePendingResources({ baseDir, files, tcpPort, tcpHosts, conn
 
   let tcpReady = false;
   for (const host of tcpHosts) {
+    throwIfAborted(signal);
     tcpReady = await tcpPortIsReady({
       host,
       port: tcpPort,
       connectTimeoutMs,
+      signal,
     });
+    throwIfAborted(signal);
     if (tcpReady) {
       break;
     }
@@ -79,6 +109,7 @@ export async function waitForResources({
   tcpHost,
   tcpPort,
   connectTimeoutMs = 500,
+  signal,
 }) {
   if (!Number.isInteger(tcpPort) || tcpPort <= 0) {
     throw new TypeError("waitForResources requires a positive integer tcpPort");
@@ -88,12 +119,14 @@ export async function waitForResources({
   const tcpHosts = tcpHost ? [tcpHost] : defaultTcpHosts;
 
   while (true) {
+    throwIfAborted(signal);
     const { pendingFiles, tcpReady } = await resolvePendingResources({
       baseDir,
       files,
       tcpPort,
       tcpHosts,
       connectTimeoutMs,
+      signal,
     });
 
     if (pendingFiles.length === 0 && tcpReady) {
@@ -114,6 +147,6 @@ export async function waitForResources({
       );
     }
 
-    await NodeTimersPromises.setTimeout(intervalMs);
+    await NodeTimersPromises.setTimeout(intervalMs, undefined, { signal });
   }
 }

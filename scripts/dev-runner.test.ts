@@ -7,6 +7,7 @@ import * as NetService from "@t3tools/shared/Net";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { assert, describe, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -20,12 +21,13 @@ import {
   createDevRunnerEnv,
   devPortProbeHosts,
   findFirstAvailableOffset,
-  getDevRunnerModeArgs,
+  getDevRunnerModeCommands,
   isBrowserAllowedPort,
   resolveModePortOffsets,
   resolveOffset,
   runDevRunnerWithInput,
 } from "./dev-runner.ts";
+import { isParentAlive, watchParentLiveness } from "./dev-runner-parent-liveness.ts";
 
 const emptyConfigLayer = ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} }));
 const netServiceLayer = Layer.succeed(NetService.NetService, {
@@ -36,13 +38,12 @@ const netServiceLayer = Layer.succeed(NetService.NetService, {
   findAvailablePort: (port) => Effect.succeed(port),
 });
 
-function mockProcess(exit: number | PlatformError.PlatformError) {
+function mockProcessWithExitCode(
+  exitCode: Effect.Effect<ChildProcessSpawner.ExitCode, PlatformError.PlatformError>,
+) {
   return ChildProcessSpawner.makeHandle({
     pid: ChildProcessSpawner.ProcessId(1),
-    exitCode:
-      typeof exit === "number"
-        ? Effect.succeed(ChildProcessSpawner.ExitCode(exit))
-        : Effect.fail(exit),
+    exitCode,
     isRunning: Effect.succeed(false),
     kill: () => Effect.void,
     unref: Effect.succeed(Effect.void),
@@ -53,6 +54,14 @@ function mockProcess(exit: number | PlatformError.PlatformError) {
     getInputFd: () => Sink.drain,
     getOutputFd: () => Stream.empty,
   });
+}
+
+function mockProcess(exit: number | PlatformError.PlatformError) {
+  return mockProcessWithExitCode(
+    typeof exit === "number"
+      ? Effect.succeed(ChildProcessSpawner.ExitCode(exit))
+      : Effect.fail(exit),
+  );
 }
 
 const devServerInput = {
@@ -84,27 +93,28 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     }),
   );
 
-  describe("getDevRunnerModeArgs", () => {
-    it.effect("lets Vite+ honor the desktop dev task graph", () =>
+  describe("getDevRunnerModeCommands", () => {
+    it.effect("runs desktop development processes as owned siblings", () =>
       Effect.sync(() => {
-        assert.deepStrictEqual(getDevRunnerModeArgs("dev:desktop"), [
-          "run",
-          "--filter=@t3tools/desktop",
-          "--filter=@t3tools/web",
-          "dev",
+        assert.deepStrictEqual(getDevRunnerModeCommands("dev:desktop"), [
+          ["run", "--filter=@t3tools/web", "dev"],
+          ["run", "--filter=@t3tools/desktop", "dev:bundle"],
+          ["run", "--filter=@t3tools/desktop", "dev:electron"],
         ]);
       }),
     );
 
     it.effect("places Vite+ run flags before the task name", () =>
       Effect.sync(() => {
-        assert.deepStrictEqual(getDevRunnerModeArgs("dev"), [
-          "run",
-          "--filter=@t3tools/contracts",
-          "--filter=@t3tools/web",
-          "--filter=t3",
-          "--parallel",
-          "dev",
+        assert.deepStrictEqual(getDevRunnerModeCommands("dev"), [
+          [
+            "run",
+            "--filter=@t3tools/contracts",
+            "--filter=@t3tools/web",
+            "--filter=t3",
+            "--parallel",
+            "dev",
+          ],
         ]);
       }),
     );
@@ -931,18 +941,26 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
     // Sharing dev:desktop would publish a URL whose renderer dials the
     // visitor's own loopback, and would clobber the VITE_DEV_SERVER_URL that
     // Electron loads from. It must decline, not half-work.
-    it.effect("declines to share for dev:desktop and still starts the stack", () => {
-      let spawnCount = 0;
-      const spawnerLayer = Layer.succeed(
-        ChildProcessSpawner.ChildProcessSpawner,
-        ChildProcessSpawner.make(() => {
-          spawnCount += 1;
-          return Effect.succeed(mockProcess(0));
-        }),
-      );
+    it.effect("declines to share for dev:desktop and still starts the stack", () =>
+      Effect.gen(function* () {
+        let spawnCount = 0;
+        const allSpawned = yield* Deferred.make<void>();
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make(() =>
+            Effect.gen(function* () {
+              spawnCount += 1;
+              if (spawnCount === 3) {
+                yield* Deferred.succeed(allSpawned, undefined);
+              }
+              return mockProcessWithExitCode(
+                Deferred.await(allSpawned).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+              );
+            }),
+          ),
+        );
 
-      return Effect.gen(function* () {
-        yield* runDevRunnerWithInput({
+        const error = yield* runDevRunnerWithInput({
           ...devServerInput,
           mode: "dev:desktop",
           port: undefined,
@@ -950,10 +968,129 @@ it.layer(NodeServices.layer)("dev-runner", (it) => {
         }).pipe(
           Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
           Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.flip,
         );
 
-        assert.equal(spawnCount, 1);
+        assert.equal(error._tag, "DevRunnerProcessExitError");
+        assert.equal(spawnCount, 3);
+      }),
+    );
+
+    it.effect("gives the Electron supervisor an owned parent-liveness pipe", () =>
+      Effect.gen(function* () {
+        const spawned: Array<ChildProcess.StandardCommand> = [];
+        const allSpawned = yield* Deferred.make<void>();
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.gen(function* () {
+              if (command._tag === "StandardCommand") {
+                spawned.push(command);
+              }
+              if (spawned.length === 3) {
+                yield* Deferred.succeed(allSpawned, undefined);
+              }
+              return mockProcessWithExitCode(
+                Deferred.await(allSpawned).pipe(Effect.as(ChildProcessSpawner.ExitCode(0))),
+              );
+            }),
+          ),
+        );
+
+        yield* runDevRunnerWithInput({
+          ...devServerInput,
+          mode: "dev:desktop",
+          port: undefined,
+        }).pipe(
+          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+          Effect.flip,
+        );
+
+        const supervisor = spawned[2];
+        assert.equal(supervisor.command, process.execPath);
+        assert.deepStrictEqual(supervisor.args, ["apps/desktop/scripts/dev-electron.mjs"]);
+        assert.deepStrictEqual(supervisor.options.additionalFds, { fd3: { type: "input" } });
+        assert.equal(supervisor.options.env?.T3CODE_DEV_PARENT_LIVENESS, "1");
+        assert.equal(supervisor.options.detached, true);
+      }),
+    );
+
+    it.effect("keeps the server child attached on Unix", () =>
+      Effect.gen(function* () {
+        let detached: boolean | undefined;
+        const spawnerLayer = Layer.succeed(
+          ChildProcessSpawner.ChildProcessSpawner,
+          ChildProcessSpawner.make((command) =>
+            Effect.sync(() => {
+              if (command._tag === "StandardCommand") {
+                detached = command.options.detached;
+              }
+              return mockProcess(0);
+            }),
+          ),
+        );
+
+        yield* runDevRunnerWithInput(devServerInput).pipe(
+          Effect.provide(Layer.mergeAll(emptyConfigLayer, netServiceLayer, spawnerLayer)),
+          Effect.provideService(HostProcess.Platform, "linux"),
+        );
+
+        assert.equal(detached, false);
+      }),
+    );
+
+    it.effect("stops when the outer parent PID disappears", () =>
+      Effect.gen(function* () {
+        let observedParentPid = 41;
+        let stop: (() => void) | undefined;
+        let parentExitCount = 0;
+        yield* Effect.promise(
+          () =>
+            new Promise<void>((resolve) => {
+              stop = watchParentLiveness({
+                intervalMs: 1,
+                initialParentPid: 41,
+                getParentPid: () => {
+                  observedParentPid = 42;
+                  return observedParentPid;
+                },
+                isParentAlive: () => true,
+                onParentExit: () => {
+                  parentExitCount += 1;
+                  stop?.();
+                  resolve();
+                },
+              });
+            }),
+        );
+
+        assert.equal(observedParentPid, 42);
+        assert.equal(parentExitCount, 1);
+      }),
+    );
+
+    it("keeps a parent with an inaccessible process probe alive", () => {
+      const permissionError = Object.assign(new Error("permission denied"), {
+        code: "EPERM",
       });
+      const unknownError = new Error("native probe failed");
+
+      assert.isTrue(
+        isParentAlive(41, () => {
+          throw permissionError;
+        }),
+      );
+      assert.isTrue(
+        isParentAlive(41, () => {
+          throw unknownError;
+        }),
+      );
+      assert.isFalse(
+        isParentAlive(41, () => {
+          throw Object.assign(new Error("no such process"), { code: "ESRCH" });
+        }),
+      );
     });
 
     // Single-origin browser dev proxies the backend at localhost, so a backend
