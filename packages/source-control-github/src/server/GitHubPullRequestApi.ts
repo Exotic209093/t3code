@@ -102,11 +102,11 @@ import {
   REVERT_PULL_REQUEST_GRAPHQL_MUTATION,
   gitHubReactionContent,
   RESOLVE_REVIEW_THREAD_GRAPHQL_MUTATION,
-  REVIEWER_CANDIDATES_GRAPHQL_QUERY,
+  reviewerCandidatesGraphQlQuery,
   REVIEW_THREAD_COMMENTS_GRAPHQL_QUERY,
   REVIEW_DISMISSALS_GRAPHQL_QUERY,
   REVIEW_THREAD_REPLY_GRAPHQL_MUTATION,
-  REVIEW_THREADS_GRAPHQL_QUERY,
+  reviewThreadsGraphQlQuery,
   reviewThreadConversation,
   UNRESOLVE_REVIEW_THREAD_GRAPHQL_MUTATION,
   UPDATE_ISSUE_COMMENT_GRAPHQL_MUTATION,
@@ -1019,18 +1019,23 @@ const decodeMergeMessage = (raw: string) =>
   Result.map(decodeMergeMessageResponse(raw), (response) => response.data.repository.pullRequest);
 
 /** What `gh pr merge` and `gh pr update-branch` read before they act. */
-const ACTION_STATE_GRAPHQL_QUERY = `
-query PullRequestActionState($owner: String!, $name: String!, $number: Int!, $headRef: String!) {
+const actionStateGraphQlQuery = (host: string) => {
+  const githubCom = host.toLowerCase() === "github.com";
+  const headRefVariable = githubCom ? ", $headRef: String!" : "";
+  const comparison = githubCom ? "baseRef { compare(headRef: $headRef) { behindBy } }" : "";
+  return `
+query PullRequestActionState($owner: String!, $name: String!, $number: Int!${headRefVariable}) {
   repository(owner: $owner, name: $name) {
     pullRequest(number: $number) {
       id
       headRefOid
       isMergeQueueEnabled
       mergeStateStatus
-      baseRef { compare(headRef: $headRef) { behindBy } }
+      ${comparison}
     }
   }
 }`;
+};
 
 const decodeActionStateResponse = Schema.decodeUnknownResult(
   Schema.fromJsonString(
@@ -1537,7 +1542,9 @@ export const make = Effect.gen(function* () {
             owner,
             name,
             number: input.number,
-            headRef: `refs/pull/${input.number}/head`,
+            ...(input.host.toLowerCase() === "github.com"
+              ? { headRef: `refs/pull/${input.number}/head` }
+              : {}),
           },
           query: pullRequestCoreGraphQlQuery(input.host),
           decode: decodePullRequestCoreJson,
@@ -2298,7 +2305,7 @@ export const make = Effect.gen(function* () {
             host: input.host,
             operation: "listReviewThreadComments",
             variables: { owner, name, number: input.number, cursor },
-            query: REVIEW_THREADS_GRAPHQL_QUERY,
+            query: reviewThreadsGraphQlQuery(input.host),
             decode: decodeReviewThreadsJson,
           });
         const entries: GitHubReviewThreadEntry[] = [];
@@ -2430,7 +2437,7 @@ export const make = Effect.gen(function* () {
         operation: "listReviewerCandidates",
         allowReserve: true,
         variables: { owner, name, number: input.number },
-        query: REVIEWER_CANDIDATES_GRAPHQL_QUERY,
+        query: reviewerCandidatesGraphQlQuery(input.host),
         decode: decodeReviewerCandidatesJson,
       });
     },
@@ -2613,12 +2620,14 @@ export const make = Effect.gen(function* () {
           host: input.host,
           operation: "runPullRequestAction",
           allowReserve: true,
-          query: ACTION_STATE_GRAPHQL_QUERY,
+          query: actionStateGraphQlQuery(input.host),
           variables: {
             owner,
             name,
             number: input.number,
-            headRef: `refs/pull/${input.number}/head`,
+            ...(input.host.toLowerCase() === "github.com"
+              ? { headRef: `refs/pull/${input.number}/head` }
+              : {}),
           },
           decode: decodeActionState,
         });
