@@ -15,11 +15,12 @@ describe.skipIf(process.platform === "win32")("dev-runner parent liveness", () =
     const supervisorModuleUrl = NodeURL.pathToFileURL(
       NodePath.resolve(import.meta.dirname, "dev-electron-parent-liveness.mjs"),
     ).href;
+    const effectModuleUrl = import.meta.resolve("effect/Effect");
     const directory = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "t3-parent-liveness-"));
     const supervisorMarker = NodePath.join(directory, "supervisor-exit");
     const runnerMarker = NodePath.join(directory, "runner-exit");
-    const supervisorCode = `import * as NodeFS from "node:fs"; import { watchParentLiveness } from ${JSON.stringify(supervisorModuleUrl)}; watchParentLiveness({ onParentExit: () => { NodeFS.writeFileSync(${JSON.stringify(supervisorMarker)}, "exited"); setTimeout(() => process.exit(0), 20); } });`;
-    const runnerCode = `import * as NodeChildProcess from "node:child_process"; import * as NodeFS from "node:fs"; import { watchParentLiveness } from ${JSON.stringify(runnerModuleUrl)}; const supervisor = NodeChildProcess.spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(supervisorCode)}], { stdio: ["ignore", "ignore", "inherit", "pipe"] }); console.log("PIDS", process.pid, supervisor.pid, process.ppid); const stop = watchParentLiveness({ onParentExit: () => { NodeFS.writeFileSync(${JSON.stringify(runnerMarker)}, "seen"); supervisor.stdio[3].end(); supervisor.once("exit", () => { NodeFS.writeFileSync(${JSON.stringify(runnerMarker)}, "exited"); stop(); setTimeout(() => process.exit(0), 20); }); } });`;
+    const supervisorCode = `import * as NodeFS from "node:fs"; import { watchParentLiveness } from ${JSON.stringify(supervisorModuleUrl)}; watchParentLiveness({ onParentExit: () => { NodeFS.writeFileSync(${JSON.stringify(supervisorMarker)}, "exited"); process.exit(0); } });`;
+    const runnerCode = `import * as NodeChildProcess from "node:child_process"; import * as NodeEvents from "node:events"; import * as Effect from ${JSON.stringify(effectModuleUrl)}; import * as NodeFS from "node:fs"; import { watchParentLiveness } from ${JSON.stringify(runnerModuleUrl)}; const supervisor = NodeChildProcess.spawn(process.execPath, ["--input-type=module", "-e", ${JSON.stringify(supervisorCode)}], { stdio: ["ignore", "ignore", "inherit", "pipe"] }); const supervisorExit = NodeEvents.once(supervisor, "exit"); console.log("PIDS", process.pid, supervisor.pid, process.ppid); await Effect.runPromise(watchParentLiveness({ onParentExit: () => {} })); NodeFS.writeFileSync(${JSON.stringify(runnerMarker)}, "seen"); supervisor.stdio[3].end(); await supervisorExit; NodeFS.writeFileSync(${JSON.stringify(runnerMarker)}, "exited"); process.exit(0);`;
     const owner = NodeChildProcess.spawn(
       process.execPath,
       [
@@ -45,7 +46,7 @@ describe.skipIf(process.platform === "win32")("dev-runner parent liveness", () =
           reject(new Error(`fixture did not start: ${output}`));
         }, 5_000);
         const onData = () => {
-          if (!output.includes("PIDS")) return;
+          if (!/PIDS \d+ \d+ \d+\r?\n/.test(output)) return;
           clearTimeout(timeout);
           owner.stdout.off("data", onData);
           resolve();
@@ -55,7 +56,7 @@ describe.skipIf(process.platform === "win32")("dev-runner parent liveness", () =
         // was registered. Check the accumulated output immediately as well.
         onData();
       });
-      const [, runnerPidText, supervisorPidText] = output.match(/PIDS (\d+) (\d+)/) ?? [];
+      const [, runnerPidText, supervisorPidText] = output.match(/PIDS (\d+) (\d+) \d+\r?\n/) ?? [];
       const runnerPid = Number(runnerPidText);
       const supervisorPid = Number(supervisorPidText);
       expect(Number.isInteger(runnerPid)).toBe(true);
@@ -90,7 +91,7 @@ describe.skipIf(process.platform === "win32")("dev-runner parent liveness", () =
       expect(owner.pid).toBeDefined();
     } finally {
       markerWatcher?.close();
-      const [, runnerPidText, supervisorPidText] = output.match(/PIDS (\d+) (\d+)/) ?? [];
+      const [, runnerPidText, supervisorPidText] = output.match(/PIDS (\d+) (\d+) \d+\r?\n/) ?? [];
       const runnerPid = Number(runnerPidText);
       const supervisorPid = Number(supervisorPidText);
       if (Number.isInteger(runnerPid)) capturedPids.add(runnerPid);
