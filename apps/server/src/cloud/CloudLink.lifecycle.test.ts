@@ -1298,7 +1298,7 @@ describe("releaseManagedTunnelOnShutdown", () => {
     const applyConfigCalls: Array<unknown> = [];
     const permanent = new CliTokenManager.CloudCliCredentialRefreshError({
       cause: new Error("private-oauth-failure"),
-      requiresLogin: true,
+      status: 400,
       oauthErrorCode: "invalid_grant",
     });
     let attempts = 0;

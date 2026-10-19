@@ -346,14 +346,19 @@ it.effect.each(["malformed", "unreadable", "stalled"] as const)(
               { status: 400 },
             ),
           ),
-        ),
+        ).pipe(Effect.delay(bodyKind === "stalled" ? Duration.seconds(4) : Duration.zero)),
       );
       yield* Effect.gen(function* () {
         const manager = yield* CliTokenManager.CloudCliTokenManager;
-        const refresh = yield* manager.getExisting.pipe(Effect.flip, Effect.forkChild);
+        const refresh = yield* manager.getExisting.pipe(
+          Effect.flip,
+          Effect.timed,
+          Effect.forkChild,
+        );
         const reader = yield* manager.hasCredential.pipe(Effect.forkChild);
-        if (bodyKind === "stalled") yield* TestClock.adjust(Duration.seconds(10));
-        const error = yield* Fiber.join(refresh);
+        if (bodyKind === "stalled") yield* TestClock.adjust(Duration.seconds(14));
+        const [duration, error] = yield* Fiber.join(refresh);
+        if (bodyKind === "stalled") assert.equal(Duration.toMillis(duration), 10_000);
         assert.instanceOf(error, CliTokenManager.CloudCliCredentialRefreshError);
         assert.isTrue(error.requiresLogin);
         assert.include(error.message, "t3 connect login");
