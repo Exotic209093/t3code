@@ -460,7 +460,7 @@ export class BootServiceMigrationRequiredError extends Schema.TaggedError<BootSe
   {},
 ) {
   override get message(): string {
-    return "Cannot defer this install while the service state migration is pending. Start or restart the service first.";
+    return "Cannot defer an install for legacy service state. Rerun `t3 update --yes` or run `t3 service install` to replace and restart the service.";
   }
 }
 
@@ -724,15 +724,13 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
   }) {
     const manager = yield* requireManager;
     const start = options?.start !== false;
-    let deferredInstallUnitExists = false;
-    if (!start) {
-      deferredInstallUnitExists = yield* fs
+    // A deferred install cannot stop a launcher that may be adopting this state.
+    if (
+      !start &&
+      (yield* fs
         .exists(unitPath)
-        .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
-    }
-    // A deferred install leaves the launcher running, so it must not replace a
-    // protocol-2 state while startup is validating and migrating that state.
-    if (deferredInstallUnitExists) {
+        .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause }))))
+    ) {
       const previousStateText = yield* fs.readFileString(statePath).pipe(Effect.option);
       if (Option.isSome(previousStateText) && parseLegacyServiceState(previousStateText.value)) {
         return yield* new BootServiceMigrationRequiredError();
@@ -802,13 +800,9 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     const installed = yield* fs
       .exists(unitPath)
       .pipe(Effect.mapError((cause) => new BootServiceInstallError({ cause })));
-    // With start=false the service keeps running while its files change. The
-    // launcher reads the state file once at startup and the unit only matters
-    // on the next start, so that is safe as long as the launcher is not in
-    // the middle of a remote update, which is the one time it writes the
-    // state file itself. That case is refused below, before anything is
-    // written, from the same read the downgrade check uses; the stop that
-    // normally serialises against the launcher is skipped on purpose.
+    // A started install stops the launcher before replacing its state. A
+    // deferred install rechecks after preparation, which can overlap startup
+    // migration or a remote update.
     if (installed && start) {
       yield* runSteps(manager.stop);
     }

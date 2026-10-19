@@ -381,33 +381,6 @@ async function runtimeExists(baseDir: string, version: string): Promise<boolean>
   }
 }
 
-/** Reads the install document at the launcher entry point, migrating the
- * two-field protocol-2 form left by an older updater after its runtime exists. */
-export async function readServiceStateForLauncher(
-  baseDir: string,
-  filePath: string,
-): Promise<ServiceState> {
-  const contents = await NodeFSP.readFile(filePath, "utf8");
-  const state = parseServiceState(contents);
-  if (state !== undefined) return state;
-
-  const legacy = parseLegacyServiceState(contents);
-  if (legacy === undefined) {
-    throw new Error("Service state is invalid or unsupported.");
-  }
-  if (!(await runtimeExists(baseDir, legacy.activeVersion))) {
-    throw new Error(`Selected t3@${legacy.activeVersion} runtime is missing or incomplete.`);
-  }
-  // This adoption is specific to protocol 2 -> 3. A future protocol bump must
-  // revalidate compatibility before rewriting an older install document.
-  const migrated = {
-    protocol: 3,
-    activeVersion: legacy.activeVersion,
-  } satisfies ServiceState;
-  await writeServiceState(filePath, migrated);
-  return migrated;
-}
-
 function terminalUpdate<S extends TerminalStatus>(input: {
   readonly pending: PendingServiceUpdate;
   readonly status: S;
@@ -858,6 +831,18 @@ export async function main(): Promise<void> {
     throw new Error("T3CODE_HOME is required by the T3 Code service launcher.");
   }
   const statePath = NodePath.join(baseDir, "runtime", SERVICE_STATE_FILE);
-  const state = await readServiceStateForLauncher(baseDir, statePath);
+  const contents = await NodeFSP.readFile(statePath, "utf8");
+  let state = parseServiceState(contents);
+  if (state === undefined) {
+    const legacy = parseLegacyServiceState(contents);
+    if (legacy === undefined) throw new Error("Service state is invalid or unsupported.");
+    if (!(await runtimeExists(baseDir, legacy.activeVersion))) {
+      throw new Error(`Selected t3@${legacy.activeVersion} runtime is missing or incomplete.`);
+    }
+    // An older coordinator can write protocol 2 beside a protocol-3 runtime.
+    // Adopt only its install record; update state needs its original launcher.
+    state = { protocol: 3, activeVersion: legacy.activeVersion };
+    await writeServiceState(statePath, state);
+  }
   await new Launcher(baseDir, state).run();
 }

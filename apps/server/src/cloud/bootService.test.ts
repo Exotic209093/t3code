@@ -4,7 +4,6 @@ import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Path from "effect/Path";
@@ -145,6 +144,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
   const control: {
     failCommand: string | undefined;
     stateAfterStop?: string;
+    onCommand?: (command: string) => Effect.Effect<void>;
     linger: string;
     enabled: boolean;
     active: boolean;
@@ -160,6 +160,7 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
     ) {
       const command = `${input.command} ${input.args.join(" ")}`;
       commands.push(command);
+      if (control.onCommand) yield* control.onCommand(command);
       timeouts.set(command, input.timeout);
       const failed = command === control.failCommand;
       if (!failed && command === "loginctl enable-linger --no-ask-password 501")
@@ -516,37 +517,113 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect("install with start=false refuses a legacy state before writing anything", () =>
-    Effect.gen(function* () {
-      const { service, fs, statePath, commands, makeService } = yield* makeHarness();
-      const path = yield* Path.Path;
-      const plan = yield* service.install();
-      const unitBefore = yield* fs.readFileString(plan.unitPath);
-      const legacyState = '{"protocol":2,"activeVersion":"1.2.3"}';
-      yield* fs.writeFileString(statePath, legacyState);
-      commands.length = 0;
+  it.effect.each(["linux", "darwin"] as const)(
+    "refuses a deferred legacy install before commands or filesystem changes on %s",
+    (platform) =>
+      Effect.gen(function* () {
+        const { service, fs, statePath, commands, makeService } = yield* makeHarness(platform);
+        const path = yield* Path.Path;
+        const plan = yield* service.install();
+        const unitBefore = yield* fs.readFileString(plan.unitPath);
+        const legacyState = '{"protocol":2,"activeVersion":"1.2.3"}';
+        const restartPending = path.join(path.dirname(statePath), SERVICE_RESTART_PENDING_FILE);
+        const newer = yield* makeService(undefined, "1.2.4");
+        yield* fs.writeFileString(statePath, legacyState);
+        yield* fs.writeFileString(restartPending, "1.2.3\n");
+        yield* fs.remove(path.dirname(plan.logPath), { recursive: true });
+        commands.length = 0;
 
-      const newer = yield* makeService(undefined, "1.2.4");
-      const result = yield* Effect.exit(newer.install({ start: false }));
+        const result = yield* newer.install({ start: false }).pipe(Effect.result);
 
-      expect(yield* fs.readFileString(statePath)).toBe(legacyState);
-      expect(yield* fs.readFileString(plan.unitPath)).toBe(unitBefore);
-      expect(
-        yield* fs.exists(path.join(path.dirname(statePath), SERVICE_RESTART_PENDING_FILE)),
-      ).toBe(false);
-      expect(commands).toEqual([]);
-      expect(Exit.isFailure(result)).toBe(true);
-      if (Exit.isSuccess(result)) return;
-      const reason = result.cause.reasons[0];
-      if (reason?._tag !== "Fail") {
-        expect.fail(`Expected a typed Fail cause, got: ${reason?._tag ?? "no reason"}`);
-      }
-      expect(reason.error).toMatchObject({
-        _tag: "BootServiceMigrationRequiredError",
-        message:
-          "Cannot defer this install while the service state migration is pending. Start or restart the service first.",
-      });
-    }),
+        expect(yield* fs.readFileString(statePath)).toBe(legacyState);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: {
+            _tag: "BootServiceMigrationRequiredError",
+            message: expect.stringContaining("t3 update --yes"),
+          },
+        });
+        expect(yield* fs.readFileString(plan.unitPath)).toBe(unitBefore);
+        expect(yield* fs.readFileString(restartPending)).toBe("1.2.3\n");
+        expect(yield* fs.exists(path.dirname(plan.logPath))).toBe(false);
+        expect(commands).toEqual([]);
+      }),
+  );
+
+  it.effect.each(["linux", "darwin"] as const)(
+    "rechecks legacy state after preparing a deferred install on %s",
+    (platform) =>
+      Effect.gen(function* () {
+        const { service, fs, statePath, commands, makeService, control } =
+          yield* makeHarness(platform);
+        const path = yield* Path.Path;
+        const plan = yield* service.install();
+        const unitBefore = yield* fs.readFileString(plan.unitPath);
+        const legacyState = '{"protocol":2,"activeVersion":"1.2.3"}';
+        const newer = yield* makeService(undefined, "1.2.4");
+        control.onCommand = (command) =>
+          command.endsWith(" --version")
+            ? fs.writeFileString(statePath, legacyState).pipe(Effect.orDie)
+            : Effect.void;
+        commands.length = 0;
+
+        const result = yield* newer.install({ start: false }).pipe(Effect.result);
+
+        expect(commands.some((command) => command.endsWith(" --version"))).toBe(true);
+        expect(yield* fs.readFileString(statePath)).toBe(legacyState);
+        expect(result).toMatchObject({
+          _tag: "Failure",
+          failure: {
+            _tag: "BootServiceMigrationRequiredError",
+            message: expect.stringContaining("t3 update --yes"),
+          },
+        });
+        expect(yield* fs.readFileString(plan.unitPath)).toBe(unitBefore);
+        expect(
+          yield* fs.exists(path.join(path.dirname(statePath), SERVICE_RESTART_PENDING_FILE)),
+        ).toBe(false);
+        expect(
+          commands.filter(
+            (command) =>
+              command.startsWith(platform === "linux" ? "systemctl " : "launchctl ") &&
+              !command.includes("show-environment"),
+          ),
+        ).toEqual([]);
+      }),
+  );
+
+  it.effect.each(["linux", "darwin"] as const)(
+    "stops a legacy service before replacing its state and unit on %s",
+    (platform) =>
+      Effect.gen(function* () {
+        const { service, fs, statePath, commands, makeService, control } =
+          yield* makeHarness(platform);
+        const plan = yield* service.install();
+        const unitBefore = yield* fs.readFileString(plan.unitPath);
+        const legacyState = '{"protocol":2,"activeVersion":"1.2.3"}';
+        const newer = yield* makeService(undefined, "1.2.4");
+        yield* fs.writeFileString(statePath, legacyState);
+        const stop =
+          platform === "linux"
+            ? "systemctl --user stop t3code.service"
+            : "launchctl bootout --wait gui/501/com.t3tools.t3code.service";
+        control.onCommand = (command) =>
+          Effect.gen(function* () {
+            if (command !== stop) return;
+            expect(yield* fs.readFileString(statePath)).toBe(legacyState);
+            expect(yield* fs.readFileString(plan.unitPath)).toBe(unitBefore);
+          }).pipe(Effect.orDie);
+        commands.length = 0;
+
+        yield* newer.install();
+
+        expect(commands).toContain(stop);
+        expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
+          protocol: SERVICE_LAUNCHER_PROTOCOL,
+          activeVersion: "1.2.4",
+        });
+        expect(yield* fs.readFileString(plan.unitPath)).toContain("versions/1.2.4/t3");
+      }),
   );
 
   it.effect("install with start=false keeps the marker when a later write fails", () =>

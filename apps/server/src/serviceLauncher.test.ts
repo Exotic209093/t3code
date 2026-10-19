@@ -2,8 +2,9 @@
 import type * as NodeChildProcess from "node:child_process";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
@@ -15,13 +16,14 @@ import {
   PREPARED_TIMEOUT_MS,
   type BackupSpaceProbe,
   readServiceState,
-  readServiceStateForLauncher,
+  main,
   writeServiceState,
 } from "./serviceLauncher.ts";
 import {
   compareExactServiceVersions,
   decodeServiceState,
   isExactServiceVersion,
+  parseServiceState,
   SERVICE_LAUNCHER_PROTOCOL,
   SERVICE_RESTART_PENDING_FILE,
   SERVICE_STOP_MARKER_FILE,
@@ -33,9 +35,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof NodeChildProcess>();
   const spawn = (...args: Parameters<typeof actual.spawn>) => {
     const [command, spawnArguments, options] = args;
-    const isWindowsFakeRuntime =
-      // oxlint-disable-next-line t3code/no-global-process-runtime -- the fake executable must mirror the host launcher name.
-      process.platform === "win32" && typeof command === "string" && command.endsWith("t3.exe");
+    const isWindowsFakeRuntime = typeof command === "string" && command.endsWith("t3.exe");
     const child = isWindowsFakeRuntime
       ? actual.spawn(
           process.execPath,
@@ -125,8 +125,7 @@ const writeFakeRuntime = (
   childSource: string,
 ) =>
   Effect.gen(function* () {
-    // oxlint-disable-next-line t3code/no-global-process-runtime -- the fixture mirrors the standalone launcher's host executable.
-    const windows = process.platform === "win32";
+    const windows = yield* HostProcess.isWindows;
     const entryPath = path.join(versionDir, windows ? "t3.exe" : "t3");
     const scriptPath = path.join(versionDir, windows ? "t3.mjs" : "t3");
     yield* fs.makeDirectory(versionDir, { recursive: true });
@@ -142,6 +141,15 @@ const writeFakeRuntime = (
     );
     return entryPath;
   });
+
+const runLauncher = async (root: string) => {
+  vi.stubEnv("T3CODE_HOME", root);
+  try {
+    await main();
+  } finally {
+    vi.unstubAllEnvs();
+  }
+};
 
 it.layer(NodeServices.layer)("service state persistence", (it) => {
   it.effect("durably replaces and strictly reads one state document", () =>
@@ -160,143 +168,127 @@ it.layer(NodeServices.layer)("service state persistence", (it) => {
     }),
   );
 
-  it.effect("migrates a protocol-2 install state before starting its runtime", () =>
+  it.effect("migrates a legacy install atomically before the launcher spawns its runtime", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-migrate-" });
       const statePath = path.join(root, "runtime", "service-state.json");
-      const activeVersion = "0.0.43-nightly.20260919.1962";
+      const activeVersion = "0.0.43-nightly.20260919.1962+build.1";
       const versionDir = path.join(root, "runtime", "versions", activeVersion);
       yield* writeFakeRuntime(
         fs,
         path,
         versionDir,
         `
-import { writeFileSync } from "node:fs";
-const context = JSON.parse(process.env.T3_SERVICE_LAUNCHER_CONTEXT);
-writeFileSync(new URL("./started", import.meta.url), context.childVersion);
+import { readFileSync, writeFileSync } from "node:fs";
+writeFileSync(new URL("./started", import.meta.url), readFileSync(new URL("../../service-state.json", import.meta.url)));
 process.exit(0);
 `,
       );
       const legacyContents = `{ "protocol": 2, "activeVersion": "${activeVersion}" }`;
-      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
       yield* fs.writeFileString(statePath, legacyContents);
+      const previousDocument = path.join(root, "previous-state.json");
+      yield* fs.link(statePath, previousDocument);
 
-      const state = yield* Effect.promise(() => readServiceStateForLauncher(root, statePath));
-      assert.deepEqual(state, { protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion });
-      assert.deepEqual(yield* Effect.promise(() => readServiceState(statePath)), {
-        protocol: SERVICE_LAUNCHER_PROTOCOL,
-        activeVersion,
-      });
-      assert.notEqual(yield* fs.readFileString(statePath), legacyContents);
-
-      const launcher = new Launcher(root, state);
+      assert.isUndefined(decodeServiceState({ protocol: 2, activeVersion }));
+      assert.isUndefined(parseServiceState(legacyContents));
       yield* Effect.promise(() =>
-        launcher.run().then(
-          () => assert.fail("launcher unexpectedly completed"),
-          (error: unknown) => {
-            assert.instanceOf(error, Error);
-            assert.equal(error.message, "Active child exited unexpectedly (0).");
-          },
+        expect(readServiceState(statePath)).rejects.toThrow(
+          "Service state is invalid or unsupported.",
         ),
       );
-      assert.equal(yield* fs.readFileString(path.join(versionDir, "started")), activeVersion);
+      yield* Effect.promise(() =>
+        expect(runLauncher(root)).rejects.toThrow("Active child exited unexpectedly (0)."),
+      );
+
+      const migrated = { protocol: SERVICE_LAUNCHER_PROTOCOL, activeVersion };
+      assert.deepEqual(yield* Effect.promise(() => readServiceState(statePath)), migrated);
+      assert.deepEqual(
+        yield* Effect.promise(() => readServiceState(path.join(versionDir, "started"))),
+        migrated,
+      );
+      assert.equal(yield* fs.readFileString(previousDocument), legacyContents);
     }),
   );
 
-  it.effect.each([
-    {
-      name: "a pending update",
-      contents:
-        '{ "protocol": 2, "activeVersion": "1.0.0", "update": { "id": "u", "fromVersion": "1.0.0", "targetVersion": "1.1.0", "dbPath": "/tmp/state.sqlite", "status": "pending" } }',
-    },
-    { name: "a future protocol", contents: '{ "protocol": 4, "activeVersion": "1.0.0" }' },
-    {
-      name: "an older unsupported protocol",
-      contents: '{ "protocol": 1, "activeVersion": "1.0.0" }',
-    },
-    { name: "an invalid version", contents: '{ "protocol": 2, "activeVersion": "latest" }' },
-    {
-      name: "an install state with extra fields",
-      contents: '{ "protocol": 2, "activeVersion": "1.0.0", "extra": true }',
-    },
-    { name: "malformed JSON", contents: "{ invalid JSON" },
-  ] as const)("rejects $name without rewriting the state file", ({ contents }) =>
+  it.effect("refuses non-install legacy documents without rewriting or spawning", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-reject-" });
       const statePath = path.join(root, "runtime", "service-state.json");
-      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
-      yield* fs.writeFileString(statePath, contents);
-
-      yield* Effect.promise(() =>
-        readServiceStateForLauncher(root, statePath).then(
-          () => assert.fail("invalid service state was accepted"),
-          (error: unknown) => {
-            assert.instanceOf(error, Error);
-            assert.equal(error.message, "Service state is invalid or unsupported.");
-          },
-        ),
+      yield* writeFakeRuntime(
+        fs,
+        path,
+        path.join(root, "runtime", "versions", "1.0.0"),
+        "process.exit(0);\n",
       );
-      assert.equal(yield* fs.readFileString(statePath), contents);
+      const legacy = { protocol: 2, activeVersion: "1.0.0" };
+      const childCount = spawnedChildren.length;
+      for (const contents of [
+        JSON.stringify({
+          ...legacy,
+          update: {
+            id: "u",
+            fromVersion: "1.0.0",
+            targetVersion: "1.1.0",
+            dbPath: "/tmp/state.sqlite",
+            status: "pending",
+          },
+        }),
+        JSON.stringify({ ...legacy, update: null }),
+        JSON.stringify({ ...legacy, extra: true }),
+        JSON.stringify({ ...legacy, protocol: 1 }),
+        JSON.stringify({ ...legacy, protocol: 4 }),
+        JSON.stringify({ ...legacy, activeVersion: "latest" }),
+        "{ invalid JSON",
+      ]) {
+        yield* fs.writeFileString(statePath, contents);
+        yield* Effect.promise(() =>
+          expect(runLauncher(root)).rejects.toThrow("Service state is invalid or unsupported."),
+        );
+        assert.equal(yield* fs.readFileString(statePath), contents);
+        assert.equal(spawnedChildren.length, childCount);
+      }
     }),
   );
 
-  it.effect("does not rewrite a legacy state when its runtime is incomplete", () =>
+  it.effect("refuses incomplete legacy runtimes without rewriting or spawning", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-missing-" });
-      const statePath = path.join(root, "runtime", "service-state.json");
-      const contents = '{ "protocol": 2, "activeVersion": "1.0.0" }';
-      yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
-      yield* fs.writeFileString(statePath, contents);
-
-      yield* Effect.promise(() =>
-        readServiceStateForLauncher(root, statePath).then(
-          () => assert.fail("legacy state with a missing runtime was accepted"),
-          (error: unknown) => {
-            assert.instanceOf(error, Error);
-            assert.equal(error.message, "Selected t3@1.0.0 runtime is missing or incomplete.");
-          },
-        ),
-      );
-      assert.equal(yield* fs.readFileString(statePath), contents);
-    }),
-  );
-
-  it.effect("does not rewrite a legacy state when its runtime layout is incomplete", () =>
-    Effect.gen(function* () {
-      const fs = yield* FileSystem.FileSystem;
-      const path = yield* Path.Path;
-      for (const scenario of ["missing executable", "mismatched install sentinel"] as const) {
+      const childCount = spawnedChildren.length;
+      for (const scenario of [
+        "missing runtime",
+        "missing executable",
+        "missing sentinel",
+        "mismatched sentinel",
+      ] as const) {
         const root = yield* fs.makeTempDirectoryScoped({ prefix: "t3-service-launcher-layout-" });
         const statePath = path.join(root, "runtime", "service-state.json");
-        const version = "1.0.0";
-        const versionDir = path.join(root, "runtime", "versions", version);
+        const versionDir = path.join(root, "runtime", "versions", "1.0.0");
         const entryPath = yield* writeFakeRuntime(fs, path, versionDir, "process.exit(0);\n");
         const sentinelPath = path.join(versionDir, ".install-complete");
-        if (scenario === "missing executable") {
+        if (scenario === "missing runtime") {
+          yield* fs.remove(versionDir, { recursive: true });
+        } else if (scenario === "missing executable") {
           yield* fs.remove(entryPath);
+        } else if (scenario === "missing sentinel") {
+          yield* fs.remove(sentinelPath);
         } else {
           yield* fs.writeFileString(sentinelPath, "0.9.0\n");
         }
-        const contents = `{ "protocol": 2, "activeVersion": "${version}" }`;
-        yield* fs.makeDirectory(path.dirname(statePath), { recursive: true });
+        const contents = '{ "protocol": 2, "activeVersion": "1.0.0" }';
         yield* fs.writeFileString(statePath, contents);
 
         yield* Effect.promise(() =>
-          readServiceStateForLauncher(root, statePath).then(
-            () => assert.fail(`${scenario} was accepted`),
-            (error: unknown) => {
-              assert.instanceOf(error, Error);
-              assert.equal(error.message, "Selected t3@1.0.0 runtime is missing or incomplete.");
-            },
+          expect(runLauncher(root)).rejects.toThrow(
+            "Selected t3@1.0.0 runtime is missing or incomplete.",
           ),
         );
         assert.equal(yield* fs.readFileString(statePath), contents);
+        assert.equal(spawnedChildren.length, childCount);
       }
     }),
   );
