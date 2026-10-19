@@ -29,7 +29,6 @@ import * as ProviderReplayHarness from "./ProviderReplayHarness.ts";
 import { runOrchestratorV2Scenario } from "./OrchestratorScenario.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import { readProviderReplayTranscript } from "@t3tools/provider-testing/replayTranscript";
-import { makeProviderReplayGate } from "@t3tools/provider-testing/replayGate";
 
 const SCENARIO = "claude_background_subagent_after_root";
 const SESSION_ID = "cca274e4-25ae-4171-b972-bbb31118517e";
@@ -118,9 +117,7 @@ const readRestartTranscript = Effect.fn("readRestartTranscript")(function* (
     ...recorded,
     entries: [
       ...recorded.entries.slice(0, rootResult + 1),
-      // Leave the provider query open so the first runtime can be snapshotted
-      // while the background subagent is still running. The runtime is then
-      // torn down normally; only the durable snapshot is used for recovery.
+      // Keep the query alive until the crash snapshot is captured.
       {
         type: "expect_outbound",
         label: "query.open:resume",
@@ -174,57 +171,53 @@ const runRestart = Effect.fn("runRestart")(function* (input: {
   });
 
   const beforeScenario = scenario("before-restart", phase1Steps);
-  const beforeReplayGate = makeProviderReplayGate(
-    phase1Steps.flatMap((step) =>
-      step.type === "release_replay_gate" || step.type === "release_replay_gate_after_waiting"
-        ? [step.label]
-        : [],
+  const before = yield* Effect.scoped(
+    Effect.gen(function* () {
+      const result = yield* runOrchestratorV2Scenario(beforeScenario);
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* worker.drain();
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = materialized.projectionThreadIds[0];
+      if (threadId === undefined) {
+        return yield* Effect.die("restart scenario has no projection thread");
+      }
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      const session = projection.providerSessions[0];
+      if (session === undefined) {
+        return yield* Effect.die("restart scenario has no provider session");
+      }
+      // Older runtimes could persist this orphaned shape across a crash; current
+      // cleanup settles the provider session when its CLI exits, so seed it here.
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        events: [
+          {
+            id: EventId.make("event:restart-background-note:stopped-provider-session"),
+            type: "provider-session.updated",
+            threadId,
+            providerInstanceId: session.providerInstanceId,
+            occurredAt: now,
+            payload: { ...session, status: "stopped", updatedAt: now, lastError: null },
+          },
+        ],
+      });
+      const sql = yield* SqlClient.SqlClient;
+      yield* sql`VACUUM INTO ${snapshotPath}`;
+      return result;
+    }).pipe(
+      Effect.provide(
+        Layer.merge(
+          ProviderReplayHarness.layerProviderReplay(beforeScenario, harness, {
+            databaseLayer: layerDatabase,
+          }),
+          layerDatabase,
+        ),
+      ),
     ),
   );
-  const beforeLayer = ProviderReplayHarness.layerProviderReplay(beforeScenario, harness, {
-    databaseLayer: layerDatabase,
-    replayGate: beforeReplayGate,
-  });
-  const snapshotBeforeProviderTeardown = Effect.gen(function* () {
-    const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
-    yield* worker.drain();
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const eventSink = yield* EventSink.EventSinkV2;
-    const threadId = materialized.projectionThreadIds[0];
-    if (threadId === undefined) {
-      return yield* Effect.die("restart scenario has no projection thread");
-    }
-    const projection = yield* orchestrator.getThreadProjection(threadId);
-    const session = projection.providerSessions[0];
-    if (session === undefined) {
-      return yield* Effect.die("restart scenario has no provider session");
-    }
-    // Older runtimes could persist this orphaned shape across a crash; current
-    // cleanup settles the provider session when its CLI exits, so seed it here.
-    const now = yield* DateTime.now;
-    yield* eventSink.write({
-      events: [
-        {
-          id: EventId.make("event:restart-background-note:stopped-provider-session"),
-          type: "provider-session.updated",
-          threadId,
-          providerInstanceId: session.providerInstanceId,
-          occurredAt: now,
-          payload: { ...session, status: "stopped", updatedAt: now, lastError: null },
-        },
-      ],
-    });
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql`VACUUM INTO ${snapshotPath}`;
-  }).pipe(Effect.provide(Layer.merge(beforeLayer, layerDatabase)), Effect.orDie);
   const snapshotDatabase = SqlitePersistence.layerFromPath(snapshotPath).pipe(
     Layer.provide(NodeServices.layer),
-  );
-  const before = yield* Effect.scoped(
-    runOrchestratorV2Scenario(beforeScenario, {
-      replayGate: beforeReplayGate,
-      afterSteps: snapshotBeforeProviderTeardown,
-    }).pipe(Effect.provide(beforeLayer)),
   );
   const settled = projectionFor(before, SCENARIO);
   assert.equal(settled.runs[0]?.status, "completed");
@@ -239,9 +232,7 @@ const runRestart = Effect.fn("runRestart")(function* (input: {
     }).pipe(
       Effect.provide(
         ProviderReplayHarness.layerProviderReplay(restartScenario, harness, {
-          databaseLayer: SqlitePersistence.layerFromPath(snapshotPath).pipe(
-            Layer.provide(NodeServices.layer),
-          ),
+          databaseLayer: snapshotDatabase,
           recoverOnStartup: true,
           continueThreadsAfterServerUpdate: input.continueThreadsAfterServerUpdate,
         }),
