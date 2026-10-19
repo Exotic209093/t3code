@@ -59,7 +59,8 @@ override the inherited service environment, except for `PATH`, `T3CODE_HOME`,
 Run `t3 service restart` after changing the file. Changes apply when the service
 starts again; switching the server version alone keeps the current values.
 A missing file is ignored; other read failures stop service startup.
-If the file contains credentials, restrict access with `chmod 600 ~/.t3/service.env`.
+If the file contains credentials, restrict access to that file with `chmod 600`
+(for the default T3 home, `chmod 600 ~/.t3/service.env`).
 
 ## Platform support
 
