@@ -45,7 +45,7 @@ export class ProviderInstanceRegistry extends Context.Service<
 interface LiveEntry {
   readonly instance: ProviderInstance;
   readonly scope: Scope.Closeable;
-  entry: ProviderInstanceConfig;
+  readonly current: { entry: ProviderInstanceConfig };
 }
 
 interface RegistryState {
@@ -127,11 +127,16 @@ const buildEntry = <R>(input: {
     const childScope = yield* Scope.make();
     yield* Scope.addFinalizer(parentScope, Scope.close(childScope, Exit.void).pipe(Effect.ignore));
 
+    const current = { entry };
     const createResult = yield* driver
       .create({
         instanceId,
-        displayName: entry.displayName,
-        accentColor: entry.accentColor,
+        get displayName() {
+          return current.entry.displayName;
+        },
+        get accentColor() {
+          return current.entry.accentColor;
+        },
         environment: entry.environment ?? [],
         enabled: resolveEntryEnabled(entry, typedConfig),
         config: typedConfig,
@@ -165,8 +170,10 @@ const buildEntry = <R>(input: {
       } = snapshot;
       return {
         ...snapshotWithoutPresentation,
-        ...(live.entry.displayName === undefined ? {} : { displayName: live.entry.displayName }),
-        ...(live.entry.accentColor === undefined ? {} : { accentColor: live.entry.accentColor }),
+        displayName: current.entry.displayName ?? driver.metadata.displayName,
+        ...(current.entry.accentColor === undefined
+          ? {}
+          : { accentColor: current.entry.accentColor }),
       };
     };
     const snapshot = {
@@ -177,15 +184,15 @@ const buildEntry = <R>(input: {
     };
     const baseSnapshotForCwd = baseInstance.snapshotForCwd;
     const live: LiveEntry = {
-      entry,
+      current,
       scope: childScope,
       instance: {
         ...baseInstance,
         get displayName() {
-          return live.entry.displayName;
+          return current.entry.displayName;
         },
         get accentColor() {
-          return live.entry.accentColor;
+          return current.entry.accentColor;
         },
         snapshot,
         ...(baseSnapshotForCwd
@@ -229,7 +236,7 @@ const makeReconcile = <R>(input: {
           continue;
         }
         const nextEntry = configMap[instanceId];
-        if (nextEntry !== undefined && !runtimeEntryEqual(live.entry, nextEntry)) {
+        if (nextEntry !== undefined && !runtimeEntryEqual(live.current.entry, nextEntry)) {
           replacedIds.add(instanceId);
         }
       }
@@ -252,8 +259,8 @@ const makeReconcile = <R>(input: {
 
         const existing = previousEntries.get(instanceId);
         if (existing !== undefined && !replacedIds.has(instanceId)) {
-          presentationChanged ||= !Equal.equals(existing.entry, entry);
-          existing.entry = entry;
+          presentationChanged ||= !Equal.equals(existing.current.entry, entry);
+          existing.current.entry = entry;
           builtEntries.set(instanceId, existing);
           continue;
         }

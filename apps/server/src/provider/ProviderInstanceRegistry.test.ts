@@ -367,7 +367,20 @@ describe("ProviderInstanceRegistry — multi-instance codex slice", () => {
                 { displayName: value.displayName, accentColor: value.accentColor },
               ]),
             ),
-          ).toEqual(Object.fromEntries(Object.keys(snapshots).map((path) => [path, presentation])));
+          ).toEqual(
+            Object.fromEntries(
+              Object.keys(snapshots).map((path) => [
+                path,
+                {
+                  ...presentation,
+                  displayName:
+                    path === "instance"
+                      ? presentation.displayName
+                      : (presentation.displayName ?? "Codex"),
+                },
+              ]),
+            ),
+          );
         }).pipe(Effect.scoped);
       }
 
