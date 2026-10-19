@@ -157,8 +157,7 @@ const buildEntry = <R>(input: {
     }
 
     const baseInstance = createResult.success;
-    let live!: LiveEntry;
-    const withPresentation = <T extends ServerProvider>(snapshot: T): T => {
+    const withPresentation = <T extends ServerProvider>(snapshot: T) => {
       const {
         displayName: _displayName,
         accentColor: _accentColor,
@@ -168,7 +167,7 @@ const buildEntry = <R>(input: {
         ...snapshotWithoutPresentation,
         ...(live.entry.displayName === undefined ? {} : { displayName: live.entry.displayName }),
         ...(live.entry.accentColor === undefined ? {} : { accentColor: live.entry.accentColor }),
-      } as T;
+      };
     };
     const snapshot = {
       ...baseInstance.snapshot,
@@ -177,26 +176,25 @@ const buildEntry = <R>(input: {
       streamChanges: baseInstance.snapshot.streamChanges.pipe(Stream.map(withPresentation)),
     };
     const baseSnapshotForCwd = baseInstance.snapshotForCwd;
-    const instance: ProviderInstance = {
-      ...baseInstance,
-      get displayName() {
-        return live.entry.displayName;
-      },
-      get accentColor() {
-        return live.entry.accentColor;
-      },
-      snapshot,
-      ...(baseSnapshotForCwd
-        ? {
-            snapshotForCwd: (cwd: string) =>
-              baseSnapshotForCwd(cwd).pipe(Effect.map(withPresentation)),
-          }
-        : {}),
-    };
-    live = {
-      instance,
-      scope: childScope,
+    const live: LiveEntry = {
       entry,
+      scope: childScope,
+      instance: {
+        ...baseInstance,
+        get displayName() {
+          return live.entry.displayName;
+        },
+        get accentColor() {
+          return live.entry.accentColor;
+        },
+        snapshot,
+        ...(baseSnapshotForCwd
+          ? {
+              snapshotForCwd: (cwd: string) =>
+                baseSnapshotForCwd(cwd).pipe(Effect.map(withPresentation)),
+            }
+          : {}),
+      },
     };
     return {
       kind: "live" as const,

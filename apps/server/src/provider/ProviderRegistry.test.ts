@@ -1814,7 +1814,7 @@ it.layer(
       );
     });
 
-    it.effect("does not run provider probes during layer construction", () =>
+    it.effect("syncs presentation changes without probing providers", () =>
       Effect.gen(function* () {
         const codexDriver = ProviderDriverKind.make("codex");
         const codexInstanceId = ProviderInstanceId.make("codex");
@@ -1891,21 +1891,20 @@ it.layer(
           assert.deepStrictEqual(yield* registry.getProviders, [initialProvider]);
           assert.strictEqual(yield* Ref.get(refreshCalls), 0);
 
-          const updates = yield* registry.streamChanges.pipe(Stream.runHead, Effect.forkChild);
-          // Let Stream.runHead acquire its PubSub subscription before the
-          // registry mutation receipt is published.
-          yield* Effect.yieldNow;
-          const presentationProvider = {
-            ...initialProvider,
-            displayName: "Work",
-            accentColor: "#654321",
-          } satisfies ServerProvider;
-          yield* Ref.set(currentProvider, presentationProvider);
-          yield* PubSub.publish(registryChanges, undefined);
-          const update = yield* Fiber.join(updates);
-          const providers = update._tag === "Some" ? update.value : [];
-          assert.strictEqual(providers[0]?.displayName, presentationProvider.displayName);
-          assert.strictEqual(providers[0]?.accentColor, presentationProvider.accentColor);
+          const updates = yield* Stream.toPull(registry.streamChanges);
+          for (const provider of [
+            { ...initialProvider, displayName: "Work", accentColor: "#654321" },
+            initialProvider,
+          ]) {
+            // Start the subscription before notifying the registry watcher.
+            const update = yield* updates.pipe(Effect.forkChild({ startImmediately: true }));
+            yield* Ref.set(currentProvider, provider);
+            yield* PubSub.publish(registryChanges, undefined);
+            const [providers] = yield* Fiber.join(update);
+            assert.deepStrictEqual(providers, [provider]);
+            assert.deepStrictEqual(yield* registry.getProviders, [provider]);
+            assert.strictEqual(yield* Ref.get(refreshCalls), 0);
+          }
         }).pipe(Effect.provide(runtimeServices));
       }),
     );
