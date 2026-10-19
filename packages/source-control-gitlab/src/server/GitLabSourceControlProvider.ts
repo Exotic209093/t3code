@@ -102,6 +102,7 @@ function refineUnknownGitLabRemote(input: SourceControlUnknownRemoteRefinementIn
     configuredHost !== null &&
     configuredHost === remoteHost;
 
+
   if (!authenticated) {
     return null;
   }
@@ -128,13 +129,13 @@ export const discovery = {
   executable: "glab",
   versionArgs: ["--version"],
   authArgs: ["auth", "status"],
-  remoteRefinementArgs: ({ context }) => [
-    "config",
-    "get",
-    "api_host",
-    "--host",
-    gitLabRemoteHost(context),
-  ],
+  // glab matches its configured hosts by exact name, so ask with the remote's own spelling.
+  remoteRefinementArgs: ({ provider, remoteUrl }) => {
+    const at = remoteUrl.toLowerCase().indexOf(provider.name.toLowerCase());
+    const host = at < 0 ? provider.name : remoteUrl.slice(at, at + provider.name.length);
+    return ["config", "get", "api_host", "--host", host];
+  },
+
   parseAuth: parseGitLabAuth,
   refineUnknownRemote: refineUnknownGitLabRemote,
   installHint:
