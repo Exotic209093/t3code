@@ -187,8 +187,8 @@ const runRestart = Effect.fn("runRestart")(function* (input: {
       if (session === undefined) {
         return yield* Effect.die("restart scenario has no provider session");
       }
-      // Older runtimes could persist this orphaned shape across a crash; current
-      // cleanup settles the provider session when its CLI exits, so seed it here.
+      // Snapshot the legacy running task before exit cleanup settles it, then
+      // seed the stopped session that older runtimes could leave after a crash.
       const now = yield* DateTime.now;
       yield* eventSink.write({
         events: [
