@@ -53,11 +53,12 @@ T3CODE_HOST=127.0.0.1
 
 Use `KEY=VALUE` entries, quoting values that contain spaces or `#`. Values are
 literal: shell commands and variable expansion are not evaluated. Entries
-override the inherited service environment, except for the executable path,
-T3 home, and service control variables that T3 Code manages.
+override the inherited service environment, except for `PATH`, `T3CODE_HOME`,
+`T3_BOOT_SERVICE_UNIT`, and `T3_SERVICE_LAUNCHER_CONTEXT` (including case variants).
 
 Run `t3 service restart` after changing the file. Changes apply when the service
 starts again; switching the server version alone keeps the current values.
+A missing file is ignored; other read failures stop service startup.
 If the file contains credentials, restrict access with `chmod 600 ~/.t3/service.env`.
 
 ## Platform support
