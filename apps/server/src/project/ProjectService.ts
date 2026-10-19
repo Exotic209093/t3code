@@ -10,6 +10,7 @@ import {
   type ThreadId,
 } from "@t3tools/contracts";
 import * as KeyedLock from "@t3tools/shared/KeyedLock";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -32,7 +33,6 @@ import * as ProjectStore from "../orchestration-v2/ProjectStore.ts";
 import * as ThreadCommandExecutor from "../orchestration-v2/ThreadCommandExecutor.ts";
 import { planThreadDeletion } from "../orchestration-v2/ThreadDeletion.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as ProjectEnrichmentService from "./ProjectEnrichmentService.ts";
 import * as WorkspacePaths from "../workspace/WorkspacePaths.ts";
 
@@ -129,7 +129,6 @@ export class ProjectService extends Context.Service<
       projectId: ProjectId,
       options?: { readonly includeDeleted?: boolean },
     ) => Effect.Effect<Option.Option<Project>, ProjectOperationError>;
-    /** Resolve the model default after applying environment and project overrides. */
     readonly getEffectiveDefaultModelSelection: (
       project: Project,
     ) => Effect.Effect<ModelSelection | null, ProjectOperationError>;
@@ -312,16 +311,17 @@ export const make = Effect.gen(function* () {
     },
   );
 
-  const getEffectiveDefaultModelSelection: ProjectService["Service"]["getEffectiveDefaultModelSelection"] =
-    Effect.fn("ProjectService.getEffectiveDefaultModelSelection")(function* (project) {
-      const settings = yield* serverSettings.getSettings.pipe(
-        Effect.mapError(
-          (cause) =>
-            new ProjectOperationError({ operation: "read-settings", projectId: project.id, cause }),
-        ),
-      );
-      return resolveProjectSettings(settings, project.id, project).settings.defaultModelSelection;
-    });
+  const getEffectiveDefaultModelSelection = Effect.fn(
+    "ProjectService.getEffectiveDefaultModelSelection",
+  )(function* (project: Project) {
+    const settings = yield* serverSettings.getSettings.pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProjectOperationError({ operation: "read-settings", projectId: project.id, cause }),
+      ),
+    );
+    return resolveProjectSettings(settings, project.id, project).settings.defaultModelSelection;
+  });
 
   const getByWorkspaceRoot: ProjectService["Service"]["getByWorkspaceRoot"] = Effect.fn(
     "ProjectService.getByWorkspaceRoot",
