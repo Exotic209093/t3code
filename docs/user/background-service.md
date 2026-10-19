@@ -37,8 +37,8 @@ installing one.
 
 `t3 uninstall` removes the background service, the `t3` launcher, and the
 downloaded versions after showing you the list and asking once. Your projects,
-threads, and settings under `~/.t3/userdata` are kept. Pass `--yes` from a
-script.
+threads, and settings under `~/.t3/userdata` are kept, along with `service.env`
+under T3 home. Pass `--yes` from a script.
 
 ## Configure the service environment
 
@@ -58,6 +58,8 @@ override the inherited service environment, except for `PATH`, `T3CODE_HOME`,
 
 Run `t3 service restart` after changing the file. Changes apply when the service
 starts again; switching the server version alone keeps the current values.
+For a service installed before env-file support, run `t3 service install` once
+with an up-to-date CLI.
 A missing file is ignored; other read failures stop service startup.
 If the file contains credentials, restrict access to that file with `chmod 600`
 (for the default T3 home, `chmod 600 ~/.t3/service.env`).
