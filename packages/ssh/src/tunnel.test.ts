@@ -155,7 +155,8 @@ describe("ssh tunnel scripts", () => {
     assert.include(launch, "T3_ARCHIVE_MODE=1");
     assert.include(launch, "T3_RELEASE_BASE_URL='https://mirror.example/t3'");
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper pick-port "$PORT_FILE"');
-    assert.include(launch, '"$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT"');
+    assert.include(launch, '"$RUNNER_FILE" __ssh-helper wait-ready "$REMOTE_PORT" "$1" "1000"');
+    assert.include(launch, 'node - "$REMOTE_PORT" "$1" "1000"');
     assert.include(launch, '"$RUNNER_FILE" __ssh-helper runtime-port "$DEFAULT_RUNTIME_FILE"');
     assert.include(SshTunnel.buildRemoteLaunchScript(NODE_SCRIPT), "T3_ARCHIVE_MODE=0");
   });
@@ -420,76 +421,75 @@ describe("ssh tunnel scripts", () => {
     ),
   );
 
-  it.effect("recreates a stale tunnel after one probe timeout", () =>
-    Effect.gen(function* () {
-      let tunnelStarts = 0;
-      let tunnelStops = 0;
-      let remoteStops = 0;
-      let probeMode: "ready" | "refused" = "ready";
-      const reuseProbeStarted = yield* Deferred.make<void>();
-      let probeCount = 0;
-      const spawner = ChildProcessSpawner.make((command) =>
-        Effect.sync(() => {
-          const args = commandArgs(command);
-          if (args.includes("-N")) {
-            tunnelStarts += 1;
-            return makeRunningProcess(() => {
-              tunnelStops += 1;
-            });
+  it.effect.each(["initial connection", "reuse"] as const)(
+    "accepts a slow healthy HTTP response on tunnel %s",
+    (phase) =>
+      Effect.gen(function* () {
+        const probeStarted = yield* Deferred.make<void>();
+        const respond = yield* Deferred.make<void>();
+        let slow = phase === "initial connection";
+        let interruptedProbes = 0;
+        let forwards = 0;
+        let kills = 0;
+        let stops = 0;
+        const spawner = ChildProcessSpawner.make((command) =>
+          Effect.sync(() => {
+            const args = commandArgs(command);
+            if (args.includes("-N")) {
+              forwards += 1;
+              return makeRunningProcess(() => {
+                kills += 1;
+              });
+            }
+            if (args.includes("sh") && args.includes("--")) {
+              return makeSuccessfulProcess('{"remotePort":3773}\n');
+            }
+            if (args.includes("sh")) stops += 1;
+            return makeSuccessfulProcess("");
+          }),
+        );
+        const httpClient = HttpClient.make((request) =>
+          Effect.gen(function* () {
+            if (slow) {
+              yield* Deferred.succeed(probeStarted, undefined);
+              yield* Deferred.await(respond).pipe(
+                Effect.onInterrupt(() =>
+                  Effect.sync(() => {
+                    interruptedProbes += 1;
+                  }),
+                ),
+              );
+            }
+            return HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+          }),
+        );
+        const layer = Layer.mergeAll(
+          NodeServices.layer,
+          Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Layer.succeed(HttpClient.HttpClient, httpClient),
+          Layer.succeed(NetService.NetService, testNetService),
+          SshAuth.SshPasswordPrompt.disabledLayer,
+          SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+        );
+        yield* Effect.gen(function* () {
+          const manager = yield* SshTunnel.SshEnvironmentManager;
+          const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
+          if (phase === "reuse") {
+            yield* manager.ensureEnvironment(target);
+            slow = true;
           }
-          if (args.includes("sh") && args.includes("--")) {
-            return makeSuccessfulProcess('{"remotePort":3773,"serverKind":"managed"}\n');
-          }
-          if (args.includes("sh")) {
-            remoteStops += 1;
-            return makeSuccessfulProcess('{"stopped":true}\n');
-          }
-          return makeSuccessfulProcess("\n");
-        }),
-      );
-      const client = HttpClient.make((request) =>
-        Effect.gen(function* () {
-          probeCount += 1;
-          if (probeMode === "refused") {
-            yield* Deferred.succeed(reuseProbeStarted, undefined);
-            return HttpClientResponse.fromWeb(request, new Response("", { status: 503 }));
-          }
-          return HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
-        }),
-      );
-      const layer = Layer.mergeAll(
-        NodeServices.layer,
-        TestClock.layer(),
-        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
-        Layer.succeed(HttpClient.HttpClient, client),
-        Layer.succeed(NetService.NetService, testNetService),
-        SshPasswordPrompt.disabledLayer,
-        SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
-      );
-      const target = {
-        alias: "stale-link",
-        hostname: "stale-link.example.com",
-        username: "tester",
-        port: 22,
-      } as const;
-
-      return yield* Effect.gen(function* () {
-        const manager = yield* SshEnvironmentManager;
-        yield* manager.ensureEnvironment(target);
-        probeMode = "refused";
-        const reconnect = yield* Effect.forkChild(manager.ensureEnvironment(target));
-        yield* Deferred.await(reuseProbeStarted);
-        yield* Effect.yieldNow;
-        yield* TestClock.adjust(Duration.seconds(8));
-        probeMode = "ready";
-        yield* Fiber.join(reconnect);
-
-        assert.isAtLeast(probeCount, 3);
-        assert.equal(tunnelStarts, 2);
-        assert.equal(tunnelStops, 1);
-        assert.equal(remoteStops, 1);
-      }).pipe(Effect.provide(layer), Effect.scoped);
-    }),
+          const connection = yield* Effect.forkChild(manager.ensureEnvironment(target));
+          yield* Deferred.await(probeStarted);
+          yield* TestClock.adjust("3 seconds");
+          assert.equal(interruptedProbes, 0, "a slow healthy response must not be canceled");
+          yield* Deferred.succeed(respond, undefined);
+          const result = yield* Fiber.join(connection);
+          assert.equal(result.httpBaseUrl, "http://127.0.0.1:41773/");
+          assert.equal(forwards, 1);
+          assert.equal(kills, 0);
+          assert.equal(stops, 0);
+        }).pipe(Effect.provide(layer), Effect.scoped);
+      }),
   );
 
   it("preserves primitive readiness reason values in diagnostic output", () => {
@@ -607,7 +607,7 @@ describe("ssh tunnel scripts", () => {
         stale = true;
         const reconnect = yield* Effect.forkChild(manager.ensureEnvironment(target));
         yield* Deferred.await(probeStarted);
-        yield* TestClock.adjust("2 seconds");
+        yield* TestClock.adjust("8 seconds");
         yield* Fiber.join(reconnect);
         assert.equal(forwards, 2);
         assert.equal(kills, 1);
