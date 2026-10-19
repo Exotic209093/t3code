@@ -281,7 +281,10 @@ it.effect("routes an offline GitLab remote using its exact host config key", () 
   }),
 );
 
-it.effect("routes a token-authenticated GitLab remote without api_host config", () =>
+it.effect.each([
+  { label: "empty", stdout: "" },
+  { label: "a separate API host and port", stdout: "api.example.test:3443\n" },
+])("routes a token-authenticated GitLab remote when api_host config is $label", ({ stdout }) =>
   Effect.gen(function* () {
     const commands: Array<ReadonlyArray<string>> = [];
     const registry = yield* makeRegistry({
@@ -291,7 +294,7 @@ it.effect("routes a token-authenticated GitLab remote without api_host config", 
           commands.push([command, ...args]);
           return Effect.succeed(
             args[0] === "config"
-              ? processOutput("")
+              ? processOutput(stdout)
               : processOutput("", {
                   stderr:
                     "Self-Hosted.Example.Test:8443\n  ✓ Logged in to Self-Hosted.Example.Test:8443 as token-user\n",
@@ -357,12 +360,10 @@ it.effect.each([
       commands,
       exitCode !== 0
         ? [configCommand, configCommand]
-        : stdout.trim() === ""
-          ? [
-              configCommand,
-              ["glab", "auth", "status", "--hostname", "self-hosted.example.test:8443"],
-            ]
-          : [configCommand],
+        : [
+            configCommand,
+            ["glab", "auth", "status", "--hostname", "self-hosted.example.test:8443"],
+          ],
     );
   }),
 );

@@ -167,18 +167,16 @@ export const makeDiscovery = Effect.gen(function* () {
         .pipe(Effect.catchIf(isMissingExecutable, () => Effect.void));
       if (config === undefined) return null;
       if (config.exitCode === 0) {
-        if (config.stdout.trim() !== "") {
-          const host = normalizeGitLabHost(context.provider.name);
-          return host !== null && normalizeGitLabHost(config.stdout) === host
-            ? {
-                kind: discovery.kind,
-                name: "GitLab Self-Hosted",
-                baseUrl: context.provider.baseUrl,
-              }
-            : null;
+        const host = normalizeGitLabHost(context.provider.name);
+        if (host !== null && normalizeGitLabHost(config.stdout) === host) {
+          return {
+            kind: discovery.kind,
+            name: "GitLab Self-Hosted",
+            baseUrl: context.provider.baseUrl,
+          };
         }
 
-        // Token-only logins can omit api_host; retain their existing auth-status discovery.
+        // Token-only logins can omit api_host, and separate API hosts need auth-status discovery.
         const verdict = yield* refineUnknownRemoteProvider({
           specs: [discovery],
           process,
