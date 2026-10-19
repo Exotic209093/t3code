@@ -9,82 +9,50 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 
 import { repointLauncher, resolveLauncherPath, resolveNewestVersion } from "./update.ts";
 
-it.effect("authenticates every paginated release check with the selected token", () =>
+it.effect.each([
+  { environment: { GH_TOKEN: " gh-token ", GITHUB_TOKEN: "github-token" }, token: "gh-token" },
+  { environment: { GH_TOKEN: "  ", GITHUB_TOKEN: " github-token " }, token: "github-token" },
+  { environment: { GITHUB_TOKEN: "github-token" }, token: "github-token" },
+  { environment: { GH_TOKEN: "  ", GITHUB_TOKEN: "  " }, token: undefined },
+  { environment: {}, token: undefined },
+])("selects release authentication from $environment", ({ environment, token }) =>
   Effect.gen(function* () {
-    const requests: Array<{
-      readonly origin: string;
-      readonly pathname: string;
-      readonly page: string;
-      readonly accept: string | undefined;
-      readonly authorization: string | undefined;
-    }> = [];
+    const authorizations: Array<string | undefined> = [];
+    const httpClient = HttpClient.make((request) => {
+      authorizations.push(request.headers.authorization);
+      return Effect.succeed(
+        HttpClientResponse.fromWeb(request, Response.json([{ tag_name: "v1.2.3" }])),
+      );
+    });
+    const version = yield* resolveNewestVersion("stable").pipe(
+      Effect.provideService(HostProcess.Environment, environment),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    );
+    assert.equal(version, "1.2.3");
+    assert.deepStrictEqual(authorizations, [token === undefined ? undefined : `Bearer ${token}`]);
+  }),
+);
+
+it.effect("authenticates each release page until the requested channel is found", () =>
+  Effect.gen(function* () {
+    const pages: string[] = [];
     const httpClient = HttpClient.make((request) => {
       const url = new URL(request.url);
+      assert.equal(url.origin, "https://api.github.com");
+      assert.equal(url.pathname, "/repos/pingdotgg/t3code/releases");
+      assert.equal(request.headers.accept, "application/vnd.github+json");
+      assert.equal(request.headers.authorization, "Bearer gh-token");
       const page = url.searchParams.get("page") ?? "";
-      requests.push({
-        origin: url.origin,
-        pathname: url.pathname,
-        page,
-        accept: request.headers.accept,
-        authorization: request.headers.authorization,
-      });
-      const body =
-        page === "3" ? [{ tag_name: "v1.2.3" }] : [{ tag_name: "v1.2.3-preview.20260101.1" }];
-      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json(body)));
+      pages.push(page);
+      const tag_name = page === "1" ? "v1.2.4-preview.20260101.1" : "v1.2.3";
+      return Effect.succeed(HttpClientResponse.fromWeb(request, Response.json([{ tag_name }])));
     });
-    const cases: ReadonlyArray<{
-      readonly environment: NodeJS.ProcessEnv;
-      readonly authorization: string | undefined;
-    }> = [
-      {
-        environment: { GH_TOKEN: "gh-token", GITHUB_TOKEN: "github-token" },
-        authorization: "Bearer gh-token",
-      },
-      {
-        environment: { GH_TOKEN: " gh-token ", GITHUB_TOKEN: " github-token " },
-        authorization: "Bearer gh-token",
-      },
-      { environment: { GITHUB_TOKEN: "github-token" }, authorization: "Bearer github-token" },
-      { environment: { GITHUB_TOKEN: " github-token " }, authorization: "Bearer github-token" },
-      {
-        environment: { GH_TOKEN: "  ", GITHUB_TOKEN: "github-token" },
-        authorization: "Bearer github-token",
-      },
-      { environment: { GH_TOKEN: "  ", GITHUB_TOKEN: "  " }, authorization: undefined },
-      { environment: {}, authorization: undefined },
-    ];
-
-    for (const testCase of cases) {
-      const start = requests.length;
-      const version = yield* resolveNewestVersion("stable").pipe(
-        Effect.provideService(HostProcess.Environment, testCase.environment),
-        Effect.provideService(HttpClient.HttpClient, httpClient),
-      );
-      assert.equal(version, "1.2.3");
-      assert.deepStrictEqual(requests.slice(start), [
-        {
-          origin: "https://api.github.com",
-          pathname: "/repos/pingdotgg/t3code/releases",
-          page: "1",
-          accept: "application/vnd.github+json",
-          authorization: testCase.authorization,
-        },
-        {
-          origin: "https://api.github.com",
-          pathname: "/repos/pingdotgg/t3code/releases",
-          page: "2",
-          accept: "application/vnd.github+json",
-          authorization: testCase.authorization,
-        },
-        {
-          origin: "https://api.github.com",
-          pathname: "/repos/pingdotgg/t3code/releases",
-          page: "3",
-          accept: "application/vnd.github+json",
-          authorization: testCase.authorization,
-        },
-      ]);
-    }
+    const version = yield* resolveNewestVersion("stable").pipe(
+      Effect.provideService(HostProcess.Environment, { GH_TOKEN: "gh-token" }),
+      Effect.provideService(HttpClient.HttpClient, httpClient),
+    );
+    assert.equal(version, "1.2.3");
+    assert.deepStrictEqual(pages, ["1", "2"]);
   }),
 );
 
