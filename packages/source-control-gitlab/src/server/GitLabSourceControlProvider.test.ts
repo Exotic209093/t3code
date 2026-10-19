@@ -4,8 +4,6 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import { ChildProcessSpawner } from "effect/process";
-import { refineUnknownRemoteProvider } from "@t3tools/source-control-core/server/discovery";
-import type * as SourceControlHost from "@t3tools/source-control-core/server/SourceControlHost";
 
 import * as GitLabCli from "./GitLabCli.ts";
 import { parseGitLabAuthStatusHosts } from "./gitLabAuthStatus.ts";
@@ -185,100 +183,6 @@ self-hosted.example.test
       host: Option.some("self-hosted.example.test"),
     },
   );
-});
-
-it("refines unknown GitLab remotes from offline host-scoped config", () => {
-  const provider = GitLabSourceControlProvider.discovery.refineUnknownRemote?.({
-    cwd: "/repo",
-    context: {
-      provider: {
-        kind: SourceControlProviderKind.make("unknown"),
-        name: "Self-Hosted.Example.Test",
-        baseUrl: "https://Self-Hosted.Example.Test",
-      },
-      remoteName: "origin",
-      remoteUrl: "https://Self-Hosted.Example.Test/group/project.git",
-    },
-    auth: {
-      exitCode: ChildProcessSpawner.ExitCode(0),
-      stdout: "https://self-hosted.example.test/\n",
-      stderr: "",
-    },
-  });
-
-  assert.deepStrictEqual(provider, {
-    kind: "gitlab",
-    name: "GitLab Self-Hosted",
-    baseUrl: "https://Self-Hosted.Example.Test",
-  });
-});
-
-it.effect("runs GitLab unknown-remote refinement against local host config", () =>
-  Effect.gen(function* () {
-    const calls: Array<{ readonly command: string; readonly args: ReadonlyArray<string> }> = [];
-    const process: SourceControlHost.SourceControlHost["Service"]["process"] = {
-      run: (input) => {
-        calls.push({ command: input.command, args: input.args });
-        return Effect.succeed({
-          exitCode: ChildProcessSpawner.ExitCode(0),
-          stdout: "self-hosted.example.test:8443\n",
-          stderr: "",
-          stdoutTruncated: false,
-          stderrTruncated: false,
-        });
-      },
-    };
-
-    const result = yield* refineUnknownRemoteProvider({
-      specs: [GitLabSourceControlProvider.discovery],
-      process,
-      cwd: "/repo",
-      context: {
-        provider: {
-          kind: SourceControlProviderKind.make("unknown"),
-          name: "Self-Hosted.Example.Test:8443",
-          baseUrl: "https://Self-Hosted.Example.Test:8443",
-        },
-        remoteName: "origin",
-        remoteUrl: "https://Self-Hosted.Example.Test:8443/group/project.git",
-      },
-    });
-
-    assert.deepStrictEqual(calls, [
-      {
-        command: "glab",
-        args: ["config", "get", "api_host", "--host", "self-hosted.example.test:8443"],
-      },
-    ]);
-    assert.strictEqual(result?.provider.kind, "gitlab");
-  }),
-);
-
-it.each([
-  { label: "empty", stdout: "\n", exitCode: 0 },
-  { label: "failed", stdout: "self-hosted.example.test\n", exitCode: 1 },
-  { label: "different host", stdout: "gitlab.com\n", exitCode: 0 },
-  { label: "legacy USER output", stdout: "james\n", exitCode: 0 },
-])("does not refine a GitLab remote when local host config is $label", ({ stdout, exitCode }) => {
-  const provider = GitLabSourceControlProvider.discovery.refineUnknownRemote?.({
-    cwd: "/repo",
-    context: {
-      provider: {
-        kind: SourceControlProviderKind.make("unknown"),
-        name: "Self-Hosted.Example.Test",
-        baseUrl: "https://Self-Hosted.Example.Test",
-      },
-      remoteName: "origin",
-      remoteUrl: "https://Self-Hosted.Example.Test/group/project.git",
-    },
-    auth: {
-      exitCode: ChildProcessSpawner.ExitCode(exitCode),
-      stdout,
-      stderr: "",
-    },
-  });
-
-  assert.strictEqual(provider, null);
 });
 
 it("parses authenticated GitLab auth status hosts with ports and single-label names", () => {

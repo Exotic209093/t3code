@@ -258,51 +258,112 @@ it.effect("routes GitLab remotes to the GitLab provider", () =>
   }),
 );
 
-it.effect("routes self-hosted GitLab remotes from matching host config", () =>
+it.effect("routes an offline GitLab remote using its exact host config key", () =>
   Effect.gen(function* () {
+    const commands: Array<ReadonlyArray<string>> = [];
     const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "https://self-hosted.example.test/group/project.git" }],
+      remotes: [{ name: "origin", url: "git@Self-Hosted.Example.Test:group/project.git" }],
       process: {
-        run: (input) => {
-          assert.deepStrictEqual(input.args, [
-            "config",
-            "get",
-            "api_host",
-            "--host",
-            "self-hosted.example.test",
-          ]);
-          return Effect.succeed(processOutput("self-hosted.example.test\n"));
+        run: ({ command, args }) => {
+          commands.push([command, ...args]);
+          return Effect.succeed(processOutput("https://self-hosted.example.test/\n"));
         },
       },
     });
 
-    const provider = yield* registry.resolve({ cwd: "/repo" });
+    const handle = yield* registry.resolveHandle({ cwd: "/repo" });
 
-    assert.strictEqual(provider.kind, "gitlab");
+    assert.strictEqual(handle.provider.kind, "gitlab");
+    assert.strictEqual(handle.context?.provider.baseUrl, "https://self-hosted.example.test");
+    assert.deepStrictEqual(commands, [
+      ["glab", "config", "get", "api_host", "--host", "Self-Hosted.Example.Test"],
+    ]);
   }),
 );
 
-it.effect("does not refine a self-hosted GitLab remote from unrelated local config", () =>
+it.effect("routes a token-authenticated GitLab remote without api_host config", () =>
   Effect.gen(function* () {
+    const commands: Array<ReadonlyArray<string>> = [];
     const registry = yield* makeRegistry({
-      remotes: [{ name: "origin", url: "https://self-hosted.example.test/group/project.git" }],
+      remotes: [{ name: "origin", url: "https://Self-Hosted.Example.Test:8443/group/project.git" }],
       process: {
-        run: (input) => {
-          assert.deepStrictEqual(input.args, [
-            "config",
-            "get",
-            "api_host",
-            "--host",
-            "self-hosted.example.test",
-          ]);
-          return Effect.succeed(processOutput("gitlab-user\n"));
+        run: ({ command, args }) => {
+          commands.push([command, ...args]);
+          return Effect.succeed(
+            args[0] === "config"
+              ? processOutput("")
+              : processOutput("", {
+                  stderr:
+                    "Self-Hosted.Example.Test:8443\n  ✓ Logged in to Self-Hosted.Example.Test:8443 as token-user\n",
+                }),
+          );
         },
       },
     });
 
-    const provider = yield* registry.resolve({ cwd: "/repo" });
+    const handle = yield* registry.resolveHandle({ cwd: "/repo" });
 
-    assert.strictEqual(provider.kind, "unknown");
+    assert.strictEqual(handle.provider.kind, "gitlab");
+    assert.strictEqual(handle.context?.provider.baseUrl, "https://self-hosted.example.test:8443");
+    assert.deepStrictEqual(commands, [
+      ["glab", "config", "get", "api_host", "--host", "Self-Hosted.Example.Test:8443"],
+      ["glab", "auth", "status", "--hostname", "Self-Hosted.Example.Test:8443"],
+    ]);
+  }),
+);
+
+it.effect.each([
+  { label: "empty", stdout: "\n", exitCode: 0 },
+  { label: "failed", stdout: "self-hosted.example.test:8443\n", exitCode: 1 },
+  { label: "another host", stdout: "gitlab.com\n", exitCode: 0 },
+  { label: "a legacy username", stdout: "gitlab-user\n", exitCode: 0 },
+  { label: "another port", stdout: "self-hosted.example.test:9443\n", exitCode: 0 },
+])("leaves a remote unknown when local GitLab config is $label", ({ stdout, exitCode }) =>
+  Effect.gen(function* () {
+    const commands: Array<ReadonlyArray<string>> = [];
+    const registry = yield* makeRegistry({
+      remotes: [{ name: "origin", url: "https://self-hosted.example.test:8443/group/project.git" }],
+      process: {
+        run: ({ command, args }) => {
+          commands.push([command, ...args]);
+          return Effect.succeed(
+            args[0] === "auth"
+              ? processOutput("", {
+                  stderr:
+                    "You are not authenticated with glab. Run glab auth login to authenticate.\n",
+                  exitCode: ChildProcessSpawner.ExitCode(1),
+                })
+              : processOutput(stdout, { exitCode: ChildProcessSpawner.ExitCode(exitCode) }),
+          );
+        },
+      },
+    });
+
+    const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+
+    assert.strictEqual(handle.provider.kind, "unknown");
+    assert.isNotNull(handle.context);
+    const next = yield* registry.resolveHandle({ cwd: "/repo", context: handle.context! });
+    assert.strictEqual(next.provider.kind, "unknown");
+    const configCommand = [
+      "glab",
+      "config",
+      "get",
+      "api_host",
+      "--host",
+      "self-hosted.example.test:8443",
+    ];
+    assert.deepStrictEqual(
+      commands,
+      exitCode !== 0
+        ? [configCommand, configCommand]
+        : stdout.trim() === ""
+          ? [
+              configCommand,
+              ["glab", "auth", "status", "--hostname", "self-hosted.example.test:8443"],
+            ]
+          : [configCommand],
+    );
   }),
 );
 
@@ -333,7 +394,7 @@ it.effect("refines the caller-selected remote instead of choosing another config
   }),
 );
 
-it.effect("routes authenticated self-hosted GitLab remotes on non-standard ports", () =>
+it.effect("routes configured self-hosted GitLab remotes on non-standard ports", () =>
   Effect.gen(function* () {
     const registry = yield* makeRegistry({
       remotes: [{ name: "origin", url: "https://self-hosted.example.test:8443/group/project.git" }],
@@ -579,7 +640,7 @@ it.effect("asks once for every checkout of a server no integration claims", () =
     const once = asked.slice();
     assert.sameMembers(once, [
       "credential git.example.internal",
-      "glab auth status --hostname Git.Example.Internal",
+      "glab config get api_host --host Git.Example.Internal",
       "fj",
       "tea",
     ]);
