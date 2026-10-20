@@ -541,12 +541,14 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         expect(new Uint8Array(yield* fs.readFile(envPath))).toEqual(envBytes);
         yield* service.install();
         expect(new Uint8Array(yield* fs.readFile(envPath))).toEqual(envBytes);
+        control.active = false;
         commands.length = 0;
 
         const newer = yield* makeService(undefined, "1.2.4");
         const plan = yield* newer.install({ start: false });
         expect(new Uint8Array(yield* fs.readFile(envPath))).toEqual(envBytes);
 
+        expect(control.active).toBe(false);
         expect(parseServiceState(yield* fs.readFileString(statePath))).toEqual({
           protocol: SERVICE_LAUNCHER_PROTOCOL,
           activeVersion: "1.2.4",
