@@ -131,6 +131,9 @@ const makeHarness = Effect.fn("test.make_boot_service_harness")(function* (
         control.active = true;
         control.unitLoaded = true;
       }
+      if (!failed && command === "systemctl --user restart --no-block t3code.service") {
+        control.active = !control.startLimitHit;
+      }
       // A stop that fails (a timeout, say) has still stopped the service.
       if (command === "systemctl --user stop t3code.service") {
         control.active = false;
@@ -752,9 +755,12 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
     }),
   );
 
-  it.effect(
-    "queues an in-service restart without stopping the caller, even on handoff failure",
-    () =>
+  it.effect.each([
+    "systemctl --user reset-failed [t]3code.service",
+    "systemctl --user daemon-reload",
+  ])(
+    "queues an in-service restart without stopping the caller, even on handoff failure: %s",
+    (failCommand) =>
       Effect.gen(function* () {
         const { service, fs, statePath, commands, control, makeService } = yield* makeHarness();
         const plan = yield* service.install();
@@ -763,17 +769,23 @@ it.layer(NodeServices.layer)("boot service install", (it) => {
         yield* fs.writeFileString(marker, "1.2.3\n");
         const inside = yield* makeService(undefined, "1.2.3", undefined, true);
         commands.length = 0;
-        control.failCommand = "systemctl --user daemon-reload";
+        control.failCommand = failCommand;
 
         const error = yield* inside.restart.pipe(Effect.flip);
         expect(error).toMatchObject({ _tag: "BootServiceCommandError", exitCode: 1 });
-        expect(commands).toEqual(["systemctl --user daemon-reload"]);
+        expect(commands).toEqual([
+          "systemctl --user reset-failed [t]3code.service",
+          ...(failCommand === "systemctl --user daemon-reload" ? [failCommand] : []),
+        ]);
         expect(control.active).toBe(true);
 
         control.failCommand = undefined;
+        control.startLimitHit = true;
         commands.length = 0;
         const outcome = yield* inside.restart;
+        expect(control.active).toBe(true);
         expect(commands).toEqual([
+          "systemctl --user reset-failed [t]3code.service",
           "systemctl --user daemon-reload",
           "systemctl --user enable t3code.service",
           "systemctl --user restart --no-block t3code.service",

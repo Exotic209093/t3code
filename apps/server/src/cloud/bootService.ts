@@ -892,7 +892,7 @@ export const make = Effect.fn("cloud.boot_service.make")(function* (input: {
     // Writes no state, and the launcher lets an update transition in flight
     // finish before the queued stop tears it down.
     if (runningInsideService && manager.handoff !== undefined) {
-      yield* runSteps(manager.handoff);
+      yield* runSteps([...manager.resetFailed, ...manager.handoff]);
       return "queued" as const;
     }
     yield* runSteps(manager.stop);
