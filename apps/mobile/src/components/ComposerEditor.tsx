@@ -3,7 +3,6 @@ import { ComposerContextId } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import { AsyncResult } from "effect/reactivity";
 import { settlePromise, squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { useNavigation } from "@react-navigation/native";
 import { useEffect, useRef, useState } from "react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { encodeComposerContextFragment } from "@t3tools/shared/composerContextClipboard";
@@ -24,6 +23,7 @@ import {
 } from "../state/use-composer-drafts";
 import { importComposerContextClipboard } from "../lib/composerContextClipboard";
 import { mobilePreferencesAtom } from "../state/preferences";
+import { useOpenLinkedThread } from "../features/threads/useOpenLinkedThread";
 import { ComposerContextSheet } from "./ComposerContextSheet";
 import { AppText as Text } from "./ui/AppText";
 import {
@@ -79,6 +79,7 @@ export function ComposerEditor({
     () => () => {
       importRef.current?.abort();
     },
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- Switching drafts aborts an import owned by the previous draft.
     [draftKey],
   );
   const pasteContext = async (
@@ -97,6 +98,7 @@ export function ComposerEditor({
         retained.attachments.length,
         controller.signal,
         retained.context?.records.length ?? 0,
+        environmentId,
       );
       if (!result) {
         insertComposerDraftText(draftKey, clipboard.text, insertion);
@@ -109,10 +111,19 @@ export function ComposerEditor({
         );
         return;
       }
+      const warnings: string[] = [];
       if (result.failures.length > 0)
+        warnings.push(
+          "Some attachments could not be copied. Reconnect to the source environment and copy them again.",
+        );
+      if (result.skippedThreads.length > 0)
+        warnings.push(
+          `${result.skippedThreads.map((title) => `"${title}"`).join(", ")} ${result.skippedThreads.length === 1 ? "is" : "are"} on another machine.`,
+        );
+      if (warnings.length > 0)
         Dialog.alert(
-          "Some attachments could not be copied",
-          "Reconnect to the source environment and copy them again. References without their files are marked unavailable.",
+          "Some context is unavailable",
+          [...warnings, "Those references are marked unavailable."].join("\n\n"),
         );
     });
     setComposerContextImporting(draftKey, false);
@@ -144,7 +155,7 @@ export function ComposerEditor({
           }),
         })
       : "";
-  const navigation = useNavigation();
+  const openLinkedThread = useOpenLinkedThread();
   const selectedReference = selected
     ? collectComposerContextReferences(selected.source)[0]
     : undefined;
@@ -226,7 +237,7 @@ export function ComposerEditor({
             : {})}
           onOpenThread={(thread) => {
             setSelected(null);
-            navigation.navigate("Thread", {
+            openLinkedThread({
               environmentId: String(thread.environmentId),
               threadId: String(thread.threadId),
             });

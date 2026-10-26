@@ -3,7 +3,10 @@ import * as Schema from "effect/Schema";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import { SourceControlProviderError, type ChangeRequest } from "@t3tools/contracts";
-import { detectSourceControlProviderFromRemoteUrl } from "@t3tools/shared/sourceControl";
+import {
+  parseGitRemoteHost,
+  unknownRemoteProvider as unknownHostProvider,
+} from "@t3tools/source-control-core/shared/definition";
 
 import * as GitLabCli from "./GitLabCli.ts";
 import * as GitLabChangeRequestTemplate from "./gitLabChangeRequestTemplate.ts";
@@ -35,6 +38,7 @@ function toChangeRequest(summary: GitLabCli.GitLabMergeRequestSummary): ChangeRe
     url: summary.url,
     baseRefName: summary.baseRefName,
     headRefName: summary.headRefName,
+    ...(summary.headSha !== undefined ? { headSha: summary.headSha } : {}),
     state: summary.state ?? "open",
     ...(summary.isDraft === true ? { isDraft: true } : {}),
     closedAt: summary.closedAt ?? null,
@@ -104,13 +108,12 @@ function refineUnknownGitLabRemote(input: SourceControlUnknownRemoteRefinementIn
   } as const;
 }
 
+/** The caller refines only an identity no host recognised, so its remote is on an unknown host. */
 function unknownRemoteProvider(remoteUrl: string) {
-  // The shared detector does not recognize userless SCP remotes.
+  // Remote host parsing does not recognize userless SCP remotes.
   const scpHost = /^([^@:/\\\s]{2,}):\/?[^/\s]+(?:\/[^/\s]+)+$/u.exec(remoteUrl.trim())?.[1];
-  const provider = detectSourceControlProviderFromRemoteUrl(
-    scpHost ? `ssh://${scpHost}` : remoteUrl,
-  );
-  return provider?.kind === "unknown" ? provider : null;
+  const remote = parseGitRemoteHost(scpHost ? `ssh://${scpHost}` : remoteUrl);
+  return remote === null ? null : unknownHostProvider(remote);
 }
 
 // A glab login confirms a self-hosted GitLab whose hostname does not identify its provider.
@@ -144,7 +147,7 @@ export const discovery = {
   executable: "glab",
   versionArgs: ["--version"],
   authArgs: ["auth", "status"],
-  // glab matches its configured hosts by exact name, so ask with the remote's own spelling.
+  // glab host matching requires the remote's exact spelling.
   remoteRefinementArgs: ({ provider, remoteUrl }) => {
     const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/]+)/iu.exec(remoteUrl.trim())?.[1];
     const remoteHost = authority
