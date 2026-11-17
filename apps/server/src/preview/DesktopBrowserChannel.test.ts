@@ -6,6 +6,7 @@ import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { vi } from "vite-plus/test";
 
 import * as ServerConfig from "../config.ts";
@@ -86,6 +87,12 @@ it.effect("awaitShown resolves once a hidden tab is reported shown", () =>
       yield* send({ type: "shown", ...key, shown: false });
       yield* send({ type: "attached", threadId: key.threadId, tabId: "sentinel" });
       yield* channel.awaitAttached({ threadId: key.threadId, tabId: "sentinel" }, "5 seconds");
+
+      // A hidden tab that is never reported shown times out instead of resolving.
+      const timedOut = yield* channel.awaitShown(key, "1 second").pipe(Effect.forkChild);
+      yield* Effect.yieldNow;
+      yield* TestClock.adjust("1 second");
+      expect(yield* Fiber.join(timedOut)).toBe(false);
 
       const shown = yield* channel.awaitShown(key, "5 seconds").pipe(Effect.forkChild);
       yield* send({ type: "shown", ...key, shown: true });
